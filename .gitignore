@@ -1,0 +1,7 @@
+site/
+deploy.local.env
+build/*.f32
+build/*.bak.html
+build/kaikki-sub.json
+__pycache__/
+*.pyc
