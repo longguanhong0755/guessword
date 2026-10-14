@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>GuessWord · 猜词</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2'><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.5-3.5'/></svg>">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ================= HOME ================= -->
+<section class="screen on" id="home">
+  <div class="homeTop">
+    <button class="iconBtn" id="histHomeBtn" aria-label="history"></button>
+    <button class="iconBtn" id="dlHomeBtn" aria-label="dictionary"></button>
+    <button class="iconBtn" id="nbHomeBtn" aria-label="notebook"></button>
+    <button class="iconBtn themeT" aria-label="theme"></button>
+  </div>
+  <div class="hero">
+    <div class="kicker">GUESS · THE · WORD</div>
+    <h1 class="logo">Guess<i>Word</i></h1>
+    <div class="rule"></div>
+    <div class="homeActions">
+      <button class="startBig" id="startBtn">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5.5v13l11-6.5z"/></svg>
+        开始猜词
+      </button>
+      <button class="resume" id="resumeBtn"></button>
+    </div>
+    <div class="langRow" id="langRow"></div>
+    <div class="homeStats" id="homeStats"></div>
+  </div>
+</section>
+
+<!-- ================= SETUP ================= -->
+<section class="screen" id="setup">
+  <div class="homeTop"><button class="iconBtn themeT" aria-label="theme"></button></div>
+  <div class="wrap setupCard">
+    <h2 class="setupTitle">选择难度区间</h2>
+    <p class="setupSub"><span id="srcNote">神秘词取自区间内的牛津/CEFR-J 官方分级词表</span> · 词库共 <b id="dictCount">…</b> 个词,其中 <b id="secretCount">…</b> 个可作神秘词。</p>
+    <div class="secLabel">难度等级</div>
+    <div class="lvGrid" id="lvGrid"></div>
+    <div class="lvInfo" id="lvInfo"></div>
+    <div class="setupBtns">
+      <button class="lbtn" id="backHome">返回</button>
+      <button class="lbtn primary" id="beginBtn">开始游戏</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= GAME ================= -->
+<section class="screen" id="game">
+  <div class="topbar">
+    <button class="iconBtn" id="homeBtn" aria-label="Home">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <span class="miniLogo">Guess<i>Word</i></span>
+    <span class="badge" id="modeBadge"></span>
+    <span class="sp"></span>
+    <button class="iconBtn sndT" aria-label="sound"></button>
+    <button class="iconBtn themeT" aria-label="theme"></button>
+    <button class="iconBtn" id="helpBtn" aria-label="How to play">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9.1 9a3 3 0 015.8 1c0 2-3 3-3 3"/><circle cx="12" cy="17.4" r=".7" fill="currentColor" stroke="none"/></svg>
+    </button>
+  </div>
+
+  <div class="gameWrap" id="gameView">
+    <form class="inputRow" id="guessForm" autocomplete="off">
+      <div class="inputGroup">
+        <svg class="ic searchIc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="guessInput" type="text" placeholder="输入一个单词" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="guess">
+        <span id="guessCounter">#1</span>
+      </div>
+      <div class="acBox" id="acBox"></div>
+      <div class="menuWrap" id="menuWrap">
+        <button type="button" class="menuBtn" id="menuBtn" aria-label="More">
+          <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+        </button>
+        <div class="dropdown" id="dropdown">
+          <button type="button" class="ddItem" id="hintItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 00-3.6 10.8c.7.55 1.1 1.2 1.1 2.2h5c0-1 .4-1.65 1.1-2.2A6 6 0 0012 3z"/></svg>
+            <span id="hintLabel">提示</span>
+          </button>
+          <button type="button" class="ddItem" id="acItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 11.5h.01M11 11.5h.01M15 11.5h.01M17 11.5h.01M8 14.5h8"/></svg>
+            <span id="acLabel">自动补全 · 开</span>
+          </button>
+          <button type="button" class="ddItem" id="nbItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20V3H6.5A2.5 2.5 0 004 5.5v14zM4 19.5A2.5 2.5 0 006.5 22H20v-5"/></svg>
+            生词本
+          </button>
+          <button type="button" class="ddItem" id="dictItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+            词典
+          </button>
+          <button type="button" class="ddItem" id="histItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+            历史记录
+          </button>
+          <button type="button" class="ddItem danger" id="giveupItem">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            放弃
+          </button>
+        </div>
+      </div>
+      <button type="button" class="resultsBtn" id="resultsBtn">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>
+        结果
+      </button>
+    </form>
+
+    <div id="resultArea" aria-live="polite"></div>
+    <hr class="sep" id="sep" style="display:none">
+    <div id="board"></div>
+    <div id="emptyState">开始猜词,看看你的进展!</div>
+  </div>
+
+  <div class="gameWrap" id="resultsView" style="display:none">
+    <div class="resCard">
+      <div class="resTitle" id="resTitle"></div>
+      <div class="resWord" id="resWord"></div>
+      <div class="resChips">
+        <span class="chip" id="chipGuesses"></span>
+        <span class="chip" id="chipHints"></span>
+        <span class="chip" id="chipMode"></span>
+      </div>
+      <div class="resBtns">
+        <button class="lbtn primary" id="shareBtn">复制结果</button>
+        <button class="lbtn" id="newWordBtn">再来一局</button>
+        <button class="lbtn" id="boardBtn">看棋盘</button>
+      </div>
+    </div>
+    <div class="statCard">
+      <h3>你的战绩</h3>
+      <div class="statSub" id="statSub"></div>
+      <div class="chart" id="distChart"></div>
+      <div class="chartLbls" id="distLbls"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= DIALOGS ================= -->
+<div class="overlay" id="confirmOverlay">
+  <div class="dialog" role="alertdialog">
+    <h2 id="confirmTitle"></h2>
+    <p class="dlgBody" id="confirmBody"></p>
+    <div class="dlgFoot">
+      <button class="btnGhost" id="confirmCancel">取消</button>
+      <button class="btnDanger" id="confirmYes">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="htpOverlay">
+  <div class="dialog">
+    <h2>怎么玩</h2>
+    <p class="dlgBody">输入一个单词。数字表示它与神秘词的语义距离:1 就是正确答案,越小越近。提示不限次数,可随时使用,提示词不会计入猜测次数。首页可切换语言(英语/日语/韩语/法语/德语/西班牙语);英语下变形词(复数、时态、英式拼写等)自动算作原形。语义距离由 ConceptNet Numberbatch 词向量本地计算(CC BY-SA 4.0)。</p>
+    <div class="demoBoard">
+      <div class="demoRow"><span>神秘词(答案)</span><span class="dn" id="demoTrophy"></span></div>
+      <div class="demoRow"><div class="df" style="width:86%;background:var(--green)"></div><span>非常近</span><span class="dn">9</span></div>
+      <div class="demoRow"><div class="df" style="width:62%;background:var(--green)"></div><span>同类词</span><span class="dn">35</span></div>
+      <div class="demoRow"><div class="df" style="width:30%;background:var(--orange)"></div><span>有点远</span><span class="dn">128</span></div>
+      <div class="demoRow"><div class="df" style="width:2.5%;background:var(--red)"></div><span>完全不沾边</span><span class="dn">1,521</span></div>
+    </div>
+    <div class="dlgFoot"><button class="btnSolid" id="htpOk">知道了</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="nbOverlay">
+  <div class="dialog">
+    <h2>生词本</h2>
+    <p class="dlgBody" id="nbSub"></p>
+    <div class="nbAdd">
+      <input id="nbAddInp" type="text" placeholder="手动添加单词…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="add word">
+      <button class="lbtn" id="nbAddBtn">添加</button>
+    </div>
+    <div class="nbList" id="nbList"></div>
+    <div class="dlgFoot">
+      <button class="btnGhost" id="nbCopy">复制全部</button>
+      <button class="btnSolid" id="nbClose">完成</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="dlOverlay">
+  <div class="dialog">
+    <h2>词典</h2>
+    <p class="dlgBody">查看词库中任意单词的释义、例句与中文翻译。点击棋盘或生词本里的单词也可以直接查看。</p>
+    <div class="dlSearch">
+      <input id="dlSearch" type="text" placeholder="查询单词…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="search word">
+      <button class="lbtn" id="dlGo">查询</button>
+    </div>
+    <div class="dlEntry" id="dlEntry"></div>
+    <div class="dlgFoot"><button class="btnSolid" id="dlClose">完成</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="histOverlay">
+  <div class="dialog">
+    <h2>历史记录</h2>
+    <p class="dlgBody" id="histSub"></p>
+    <div class="histList" id="histList"></div>
+    <div class="dlgFoot">
+      <button class="btnGhost" id="histClear">清空</button>
+      <button class="btnSolid" id="histClose">完成</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="toast" role="status"></div>
+
+<script src="js/data-en.js"></script>
+<script src="js/data-extra.js"></script>
+<script src="js/data-ja.js"></script>
+<script src="js/data-ko.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

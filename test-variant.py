@@ -35,7 +35,7 @@ with sync_playwright() as p:
     result["boot1"] = pg.evaluate("""() => ({
         bootOvDisplay: (document.getElementById('bootOv')||{style:{}}).style.display || 'unset',
         dictCount: document.getElementById('dictCount').textContent,
-        cacheReady: caches.has('gwd-data-v1')
+        cacheReady: caches.has('gwd-data-v2')
     })""")
 
     # ---- home -> setup -> start ----
@@ -104,7 +104,7 @@ with sync_playwright() as p:
     })""")
 
     # ---- cache entries ----
-    result["cacheEntries"] = pg.evaluate("caches.open('gwd-data-v1').then(c => c.keys()).then(ks => ks.length)")
+    result["cacheEntries"] = pg.evaluate("caches.open('gwd-data-v2').then(c => c.keys()).then(ks => ks.length)")
 
     # ---- second load: boot from Cache API ----
     t1 = time.time()

@@ -5,3 +5,4 @@ build/*.bak.html
 build/kaikki-sub.json
 __pycache__/
 *.pyc
+dist/

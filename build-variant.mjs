@@ -1,27 +1,38 @@
-// Build the split/parallel-load MULTILINGUAL deploy variant of GuessWord from the single-file master.
-// Master stays untouched; output goes to site/ (index.html + data/* + _headers).
+// Build the split/parallel-load MULTILINGUAL deploy variant of GuessWord from the split sources
+// (index.html + css/app.css + js/data-*.js + js/app.js, composed by build/compose.mjs).
+// Sources stay untouched; output goes to site/ (index.html + data/* + _headers).
 // Usage: node build-variant.mjs [secondary-data-origin]
 //   Secondary origin (e.g. https://<hash>.guessword-173.pages.dev) gives the browser a second
 //   TCP flow for chunk downloads (~2x cold-boot throughput on lossy links).
 // Per language L: data/gw-<L>-meta.json + data/gw-<L>-vec-<i>.bin + data/gwdict-<L>-<i>.bin
-// en/ja/ko packs live in the master; fr/de/es come from D:/gw-dl/lang/pack-<L>.json + dict-<L>.json.
+// en/ja/ko packs live in js/data-*.js; fr/de/es come from D:/gw-dl/lang/pack-<L>.json + dict-<L>.json.
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { compose } from './build/compose.mjs';
 
-const MASTER = 'D:/workspace/guessword/guessword.html';
+const ROOT = 'D:/workspace/guessword';
 const OUT = 'D:/workspace/guessword/site';
 const WRANGLER_TOML = 'D:/workspace/guessword/wrangler.toml';
 const LANGDIR = 'D:/gw-dl/lang';
-const VER = 'v20261014a';   // bump on data change to bust immutable caches
+const VER = 'v20261014b';   // bump on data change to bust immutable caches
 const SECHOST = (process.argv[2] || '').replace(/\/$/, '');
 const CHUNK_BYTES = 900000; // ~0.9MB per chunk
 const CHUNK_LANGS = ['en', 'ja', 'ko', 'fr', 'de', 'es'];
 
-fs.rmSync(OUT, { recursive: true, force: true });
+try {
+  fs.rmSync(OUT, { recursive: true, force: true });
+} catch (e) {
+  // site/ can still be some other process's working directory (e.g. an interrupted deploy):
+  // Windows refuses to delete the directory itself, but its contents can go.
+  fs.mkdirSync(OUT, { recursive: true });
+  for (const f of fs.readdirSync(OUT, { withFileTypes: true })) {
+    try { fs.rmSync(path.join(OUT, f.name), { recursive: true, force: true }); } catch (e2) { /* keep going */ }
+  }
+}
 fs.mkdirSync(path.join(OUT, 'data'), { recursive: true });
 
-const src = fs.readFileSync(MASTER, 'utf8');
+const src = compose(ROOT);
 const lines = src.split('\n');
 const find = (pred, from = 0) => {
   for (let i = from; i < lines.length; i++) if (pred(lines[i])) return i;
