@@ -252,7 +252,12 @@
   .histRow:hover{background:var(--panel2)}
   .histSt{flex-shrink:0; display:flex}
   .histSt.w{color:var(--green)} .histSt.l{color:var(--red)}
+  .histSt.o{color:var(--accent)}
   .histSt svg.ic{width:15px;height:15px}
+  .histCont{flex-shrink:0; border:1px solid var(--accent); color:var(--accent); background:transparent; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit}
+  .histCont:hover{background:var(--accent); color:#fff}
+  .histOng .histW{color:var(--muted)}
+  .histOng .histR{color:var(--accent); border-color:var(--accent)}
   .histW{font-weight:700; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .histW[data-w]{cursor:pointer}
   .histW[data-w]:hover{color:var(--accent)}

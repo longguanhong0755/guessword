@@ -19,6 +19,15 @@ const LANGS = {
 };
 function langCn(){ try{ return LANGS[LANG].cn || "英文"; }catch(e){ return "英文"; } }
 function phText(){ return "输入一个" + langCn() + "单词"; }
+/* ---------- online engine (deploy build: ranking + dictionary served by /api) ---------- */
+let REMOTE = false;      // set during boot when the deploy loader is present (window.__gwRemote)
+let gameToken = null;    // remote game handle — the secret stays server-side, encrypted inside it
+function apiURL(path){ return (window.__gwAPI || "/api") + path; }
+function apiPost(path, data){
+  return fetch(apiURL(path), { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(data || {}) })
+    .then(r => { if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+    .then(j => { if(j && j.err) throw new Error(j.err); return j; });
+}
 const PACK_SRC = { en:()=>GWD, ja:()=>GW_JA, ko:()=>GW_KO, fr:()=>GW_FR, de:()=>GW_DE, es:()=>GW_ES };
 const PACK_MAP = { en:()=>GWMAP };
 const DICT_SRC = { en:()=>GWDICT_B64, ja:()=>GWDICT_JA_B64, ko:()=>GWDICT_KO_B64, fr:()=>GWDICT_FR_B64, de:()=>GWDICT_DE_B64, es:()=>GWDICT_ES_B64 };
@@ -26,23 +35,27 @@ function decodePack(src, mapStr){
   const D2 = src.D, N2 = src.N;
   const words = src.words.split("|");
   const lv = src.level.split("").map(c => +c);
-  let bytes;
-  if(typeof src.vec === "string"){
-    const b64 = atob(src.vec);
-    bytes = new Uint8Array(b64.length);
-    for(let i=0;i<b64.length;i++) bytes[i] = b64.charCodeAt(i);
-  } else {
-    bytes = src.vec;
-  }
-  const unit = new Float32Array(N2*D2);
-  const min = src.min, max = src.max;
-  for(let i=0;i<N2;i++) for(let d=0;d<D2;d++) unit[i*D2+d] = min[d] + (bytes[i*D2+d]/255)*(max[d]-min[d]);
-  // normalize rows to unit length so cosine = dot product
-  for(let i=0;i<N2;i++){
-    let n2 = 0;
-    for(let d=0;d<D2;d++){ const v=unit[i*D2+d]; n2 += v*v; }
-    const inv = 1/Math.sqrt(n2) || 0;
-    for(let d=0;d<D2;d++) unit[i*D2+d] *= inv;
+  // src without .vec = lightweight word list (online mode: vectors stay server-side)
+  let unit = null;
+  if(src.vec){
+    let bytes;
+    if(typeof src.vec === "string"){
+      const b64 = atob(src.vec);
+      bytes = new Uint8Array(b64.length);
+      for(let i=0;i<b64.length;i++) bytes[i] = b64.charCodeAt(i);
+    } else {
+      bytes = src.vec;
+    }
+    unit = new Float32Array(N2*D2);
+    const min = src.min, max = src.max;
+    for(let i=0;i<N2;i++) for(let d=0;d<D2;d++) unit[i*D2+d] = min[d] + (bytes[i*D2+d]/255)*(max[d]-min[d]);
+    // normalize rows to unit length so cosine = dot product
+    for(let i=0;i<N2;i++){
+      let n2 = 0;
+      for(let d=0;d<D2;d++){ const v=unit[i*D2+d]; n2 += v*v; }
+      const inv = 1/Math.sqrt(n2) || 0;
+      for(let d=0;d<D2;d++) unit[i*D2+d] *= inv;
+    }
   }
   return { D:D2, N:N2, WORDS:words, LVIDX:lv, UNIT:unit,
            IDX:new Map(words.map((w,i)=>[w,i])),
@@ -60,6 +73,17 @@ function getPack(lang){
   return packCache[lang] = decodePack(src, mapStr);
 }
 function packAvailable(lang){ try{ return !!(PACK_SRC[lang] && PACK_SRC[lang]()); }catch(e){ return false; } }
+// load a language: online mode fetches only the word list, offline decodes the full vectors
+function ensurePack(lang, onProg){
+  if(packCache[lang]) return Promise.resolve(packCache[lang]);
+  if(REMOTE && window.__loadMeta){
+    return window.__loadMeta(lang).then(() => { if(onProg) onProg(1); return getPack(lang); });
+  }
+  if(window.__loadLang && !packAvailable(lang)){
+    return window.__loadLang(lang, onProg).then(() => getPack(lang));
+  }
+  return Promise.resolve(getPack(lang));
+}
 const levelsOf = lang => (LANGS[lang] || LANGS.en).levels;
 let LANG = "en";
 let LEVELS, D, N, WORDS, LVIDX, UNIT, IDX, LEMMA;
@@ -74,13 +98,27 @@ function activateLang(lang){
 const $ = id => document.getElementById(id);
 const LSKEY = "guessword-v2";
 const MODEL_VER = "nb1908b";   // embedding model tag; history saved under an older tag gets distances recomputed
-let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], current:null, notebook:[] };
+let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[] };
 try{ const raw = localStorage.getItem(LSKEY); if(raw){ store = Object.assign(store, JSON.parse(raw)); } }catch(e){}
 if(!Array.isArray(store.notebook)) store.notebook = [];
+if(!Array.isArray(store.games)) store.games = [];
 if(typeof store.settings.ac !== "boolean") store.settings.ac = true;
 if(!LANGS[store.settings.lang]) store.settings.lang = "en";
-activateLang(store.settings.lang);
 function save(){ try{ localStorage.setItem(LSKEY, JSON.stringify(store)); }catch(e){} }
+// migrate the old single "current game" slot into the unfinished-games list
+if(store.current){
+  const c = store.current;
+  if(c && c.state==="ongoing" && c.board && c.board.length){
+    store.games.push({ gid: Date.now().toString(36)+Math.random().toString(36).slice(2,6), lo:c.lo, hi:c.hi, lang:c.lang||"en",
+                       secret:c.secret, board:c.board.map(e=>({word:e.word, isHint:!!e.isHint})), state:"ongoing", at:Date.now() });
+  } else if(c && (c.state==="won"||c.state==="lost") && c.secret){
+    store.history.push({ lo:c.lo, hi:c.hi, secret:c.secret, state:c.state, lang:c.lang||"en", board:(c.board||[]), at:Date.now(), mv:MODEL_VER });
+  }
+  delete store.current;
+  save();
+}
+if(store.games.length > 300) store.games.splice(0, store.games.length - 300);
+activateLang(store.settings.lang);
 
 let selLo = null, selHi = null;
 let cfg = null;
@@ -147,21 +185,27 @@ function pickSecret(lo, hi){
   return use[Math.floor(Math.random()*use.length)];
 }
 
-/* ---------- persistence of current game ---------- */
+/* ---------- persistence of unfinished games (every unfinished game is kept) ---------- */
+function newGid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function findGame(gid){ return store.games.find(g => g.gid === gid) || null; }
+function latestGame(){ return store.games.length ? store.games[store.games.length-1] : null; }
 function persistCurrent(){
-  store.current = {
-    lo: cfg.lo, hi: cfg.hi, secret, lang: cfg.lang || LANG,
-    board: board.map(e => ({word:e.word, isHint:e.isHint})),
-    state
-  };
+  if(!cfg || state !== "ongoing") return;
+  const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
+                board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null) })),
+                at: Date.now() };
+  if(REMOTE) rec.token = gameToken; else rec.secret = secret;
+  const rest = store.games.filter(g => g.gid !== cfg.gid);
+  rest.push(rec);                     // most recent activity goes last (home "continue" uses the last)
+  store.games = rest;
+  while(store.games.length > 300) store.games.shift();
   save();
 }
 function finishToHistory(){
   store.history.push({ lo:cfg.lo, hi:cfg.hi, secret, state, lang: cfg.lang || LANG, board:board.map(e=>({word:e.word,isHint:e.isHint,distance:e.distance})), at:Date.now(), mv:MODEL_VER });
   while(store.history.length > 300) store.history.shift();
-  store.recent.push(secret);
-  while(store.recent.length > 200) store.recent.shift();
-  store.current = null;
+  if(secret){ store.recent.push(secret); while(store.recent.length > 200) store.recent.shift(); }
+  if(cfg) store.games = store.games.filter(g => g.gid !== cfg.gid);
   save();
 }
 
@@ -192,11 +236,13 @@ function foldWord(w){
 }
 
 /* ---------- hint target (nearest unused rank closer than best) ---------- */
+function boardRanks(){ return board.map(e => e.r).filter(x => x != null); }
 function pickHintRank(giveUp){
   const n = ranks.N;
-  const used = new Set(board.map(e => ranks.rankOf.get(e.word)));
+  const rs = boardRanks();
+  const used = new Set(rs);
   if(giveUp) return 1;
-  const best = board.length ? Math.min(...board.map(e => ranks.rankOf.get(e.word))) : null;
+  const best = rs.length ? Math.min(...rs) : null;
   if(best === null) return Math.max(2, Math.round(1 + (1000-1)/ranks.K));
   if(best <= 20){
     for(let x=best-1; x>=2; x--) if(!used.has(x)) return x;
@@ -373,10 +419,31 @@ async function submitGuess(raw){
   busy = true;
   result = {type:"loading"};
   renderInputRow(); renderResultArea();
-  await new Promise(r => setTimeout(r, 180 + Math.random()*140));
+  let r, d;
+  if(REMOTE){
+    let it = null;
+    try{
+      const j = await apiPost("/guess", { t: gameToken, words:[word] });
+      it = j.items && j.items[0];
+    }catch(e){
+      busy = false;
+      result = {type:"error", msg:"网络异常,请重试"};
+      sfx.error(); renderResultArea(); return false;
+    }
+    if(!it){
+      busy = false;
+      result = {type:"error", msg:"抱歉,词表里没有这个词"};
+      sfx.notfound(); renderResultArea(); return false;
+    }
+    r = it.r; d = it.d;
+    if(r === 1) secret = word;   // guessed the secret — the only way to learn it before the end
+  } else {
+    await new Promise(res => setTimeout(res, 180 + Math.random()*140));
+    r = ranks.rankOf.get(word);
+    d = ranks.distOf[r-1];
+  }
   busy = false;
-  const rank = ranks.rankOf.get(word);
-  applyEntry({word, distance:ranks.distOf[rank-1], isHint:false});
+  applyEntry({word, r, d, distance:d, isHint:false});
   return true;
 }
 async function requestHint(giveUp){
@@ -384,15 +451,29 @@ async function requestHint(giveUp){
   busy = true;
   result = {type:"loading"};
   renderInputRow(); renderResultArea();
-  await new Promise(r => setTimeout(r, 240));
-  busy = false;
   const tr = giveUp ? 1 : pickHintRank(false);
   if(tr == null){
+    busy = false;
     result = {type:"error", msg:"获取提示失败,请重试"};
     sfx.error(); renderResultArea(); return;
   }
-  const word = ranks.wordAt[tr-1];
-  applyEntry({word, distance:ranks.distOf[tr-1], isHint:true, force:giveUp});
+  let word, d, r;
+  if(REMOTE){
+    try{
+      const j = await apiPost("/hint", { t: gameToken, r: tr });
+      word = j.word; d = j.d; r = j.r || tr;
+    }catch(e){
+      busy = false;
+      result = {type:"error", msg:"网络异常,请重试"};
+      sfx.error(); renderResultArea(); return;
+    }
+    if(giveUp) secret = word;   // revealed by the rank-1 hint
+  } else {
+    await new Promise(res => setTimeout(res, 240));
+    word = ranks.wordAt[tr-1]; d = ranks.distOf[tr-1]; r = tr;
+  }
+  busy = false;
+  applyEntry({word, r, d, distance:d, isHint:true, force:giveUp});
 }
 function clearResult(){ result = null; marker = null; renderResultArea(); }
 
@@ -424,9 +505,7 @@ function historyStats(){
   const buckets = [{label:"<9",min:1,max:9},{label:"10s",min:10,max:19},{label:"20s",min:20,max:29},{label:"30s",min:30,max:39},{label:"40s",min:40,max:49},{label:"50s",min:50,max:59},{label:"60s",min:60,max:69},{label:"70s",min:70,max:79},{label:"80s",min:80,max:89},{label:"90s",min:90,max:99},{label:"100+",min:100,max:1000},{label:"X",min:1001,max:1e9}];
   const counts = buckets.map(()=>0);
   let played=0, wins=0, sum=0;
-  const all = store.current && (store.current.state==="won"||store.current.state==="lost")
-    ? store.history.concat([{lo:store.current.lo,hi:store.current.hi,state:store.current.state,board:store.current.board}])
-    : store.history;
+  const all = store.history;
   for(const g of all){
     if(g.state!=="won" && g.state!=="lost") continue;
     played++;
@@ -633,6 +712,22 @@ $("nbItem").onclick = ()=>{ $("dropdown").classList.remove("open"); openNotebook
 const escHtml = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const POS_ZH = {noun:"名词",verb:"动词",adj:"形容词",adv:"副词",pron:"代词",prep:"介词",conj:"连词",det:"限定词",particle:"助词",intj:"感叹词",num:"数词",name:"专名",phrase:"短语",abbr:"缩写",symbol:"符号",suffix:"后缀",prefix:"前缀",aux:"助动词",article:"冠词"};
 const DICT_CACHE = {};
+const DICT_ONE = new Map();   // online mode: "lang|word" -> entry | null (miss) | 0 (error, not cached)
+const DICT_ERR = 0;
+async function dictLookupOne(lang, word){
+  const key = lang + "|" + word;
+  if(DICT_ONE.has(key)) return DICT_ONE.get(key);
+  let v = null;
+  try{
+    const r = await fetch(apiURL("/def?lang=" + encodeURIComponent(lang) + "&word=" + encodeURIComponent(word)));
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    v = j.entry || null;
+  }catch(e){ return DICT_ERR; }
+  DICT_ONE.set(key, v);
+  if(DICT_ONE.size > 4000) DICT_ONE.clear();
+  return v;
+}
 let dlSeq = 0, dictLang = "en";
 function loadDict(lang){
   lang = lang || LANG;
@@ -657,19 +752,32 @@ async function renderDict(q){
   const seq = ++dlSeq, box = $("dlEntry");
   const dl = dictLang;
   if(!q){ box.innerHTML = '<div class="dlEmpty">输入一个单词,或直接点击棋盘、生词本里的词。</div>'; return; }
-  if(!DICT_CACHE[dl]){
-    box.innerHTML = '<div class="dlEmpty">词典加载中…</div>';
-    await loadDict(dl);
-    if(seq !== dlSeq || !$("dlOverlay").classList.contains("open")) return;
-    if(!DICT_CACHE[dl]){ box.innerHTML = '<div class="dlEmpty">词典数据加载失败。</div>'; return; }
-  }
-  const DD = DICT_CACHE[dl];
-  let key = null;
+  let key = null, e = null;
   const cands = [q, q.toLowerCase()];
-  try{ const f = foldWord(q); if(f) cands.push(f); }catch(e){}
-  for(const c of cands){ if(c && DD[c]){ key = c; break; } }
+  try{ const f = foldWord(q); if(f) cands.push(f); }catch(err){}
+  if(REMOTE){
+    box.innerHTML = '<div class="dlEmpty">词典加载中…</div>';
+    for(const c of cands){
+      if(!c) continue;
+      const ent = await dictLookupOne(dl, c);
+      if(ent === DICT_ERR){
+        if(seq === dlSeq && $("dlOverlay").classList.contains("open")) box.innerHTML = '<div class="dlEmpty">词典加载失败,请重试。</div>';
+        return;
+      }
+      if(ent){ key = c; e = ent; break; }
+    }
+    if(seq !== dlSeq || !$("dlOverlay").classList.contains("open")) return;
+  } else {
+    if(!DICT_CACHE[dl]){
+      box.innerHTML = '<div class="dlEmpty">词典加载中…</div>';
+      await loadDict(dl);
+      if(seq !== dlSeq || !$("dlOverlay").classList.contains("open")) return;
+      if(!DICT_CACHE[dl]){ box.innerHTML = '<div class="dlEmpty">词典数据加载失败。</div>'; return; }
+    }
+    const DD = DICT_CACHE[dl];
+    for(const c of cands){ if(c && DD[c]){ key = c; e = DD[c]; break; } }
+  }
   if(!key){ box.innerHTML = `<div class="dlEmpty">词典未收录 “${escHtml(q)}”。</div>`; return; }
-  const e = DD[key];
   const P = getPack(dl);
   const li = (P && P.IDX.has(key)) ? P.LVIDX[P.IDX.get(key)] : null;
   const lv = li!=null && li<=5 ? `<span class="dlLv">${escHtml(levelsOf(dl)[li])}</span>` : "";
@@ -739,9 +847,12 @@ function fmtWhen(at){
 function histGameRows(g){
   const gl = (g.lang && LANGS[g.lang]) ? g.lang : "en";
   let dOf = null, rOf = null;
-  try{ const rg = buildRanks(g.secret, gl); if(rg){ dOf = rg.distOf; rOf = rg.rankOf; } }catch(e){}
+  if(g.secret){
+    try{ const rg = buildRanks(g.secret, gl); if(rg){ dOf = rg.distOf; rOf = rg.rankOf; } }catch(e){}
+  }
   const distOf = e => {
-    if(e.distance && g.mv===MODEL_VER) return e.distance;
+    if(e.distance && g.mv===MODEL_VER) return e.distance;   // finished games store the distance
+    if(e.d != null) return e.d;                             // unfinished games store it too
     if(rOf){ const r = rOf.get(e.word); if(r) return dOf[r-1]; }
     return 3001;
   };
@@ -750,42 +861,65 @@ function histGameRows(g){
     return `<div class="hRow"><div class="hFill" style="width:${barWidth(dist)}%;background:var(--${barColor(dist)})"></div><span class="hw">${e.isHint?IC.bulbSm:""}${escHtml(cap(e.word))}${e.isHint?'<i class="hHint">提示</i>':""}</span><span class="hn">${dist===1 ? (e.isHint?"揭晓":"答案") : fmt(dist)}</span></div>`;
   }).join("");
 }
-function renderHist(){
-  const games = store.history, list = $("histList");
-  const wins = games.filter(g=>g.state==="won").length;
-  $("histSub").textContent = games.length
-    ? `共 ${games.length} 局 · 胜 ${wins} · 胜率 ${Math.round(wins/games.length*100)}% · 点击行展开棋局,点单词查词典`
-    : "完成一局后会自动保存在这里。";
-  if(!games.length){ list.innerHTML = `<div class="nbEmpty">还没有记录。来玩一局,结束的棋局都会存档在此。</div>`; return; }
-  list.innerHTML = games.map((g,i)=>{
-    const won = g.state==="won";
-    const gl = (g.lang && LANGS[g.lang]) ? g.lang : "en";
-    const gc = (g.board||[]).filter(e=>!e.isHint).length;
-    return `<div class="histItem" data-i="${i}">
+function histRowHTML(g, opts){
+  const won = g.state==="won";
+  const gl = (g.lang && LANGS[g.lang]) ? g.lang : "en";
+  const gc = (g.board||[]).filter(e=>!e.isHint).length;
+  if(opts && opts.unfinished){
+    return `<div class="histItem histOng" data-gid="${escHtml(g.gid)}">
+      <div class="histRow"><span class="histSt o">${IC.clock}</span>
+      <span class="histW"${g.secret?` data-rw="${escHtml(g.secret)}"`:""}>未完成的对局<i class="histLang">${escHtml(LANGS[gl].name)}</i></span>
+      <span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span>
+      <span class="histMeta">已猜 ${gc} · ${fmtWhen(g.at)}</span>
+      <button type="button" class="histCont" data-gid="${escHtml(g.gid)}">继续</button>
+      <span class="histChev">${IC.chevR}</span></div>
+      <div class="histDet"><div class="hRows">${histGameRows(g)}</div></div>
+    </div>`;
+  }
+  return `<div class="histItem" data-i="${opts.i}">
       <div class="histRow"><span class="histSt ${won?"w":"l"}">${won?IC.trophy:IC.x}</span>
-      <span class="histW" data-w="${escHtml(g.secret)}">${escHtml(gl==="de" ? g.secret : cap(g.secret))}${gl!=="en"?`<i class="histLang">${escHtml(LANGS[gl].name)}</i>`:""}</span>
+      <span class="histW" data-w="${escHtml(g.secret)}" data-lang="${escHtml(gl)}">${escHtml(gl==="de" ? g.secret : cap(g.secret))}${gl!=="en"?`<i class="histLang">${escHtml(LANGS[gl].name)}</i>`:""}</span>
       <span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span>
       <span class="histMeta">${gc} 猜 · ${fmtWhen(g.at)}</span>
       <span class="histChev">${IC.chevR}</span></div>
       <div class="histDet"><div class="hRows">${histGameRows(g)}</div></div>
     </div>`;
-  }).join("");
+}
+function renderHist(){
+  const games = store.history, list = $("histList");
+  const wins = games.filter(g=>g.state==="won").length;
+  const ong = store.games.slice().reverse();
+  const ongNote = ong.length ? ` · ${ong.length} 局未完成,点“继续”接着玩` : "";
+  $("histSub").textContent = (games.length || ong.length)
+    ? `共 ${games.length} 局 · 胜 ${wins} · 胜率 ${games.length? Math.round(wins/games.length*100) : 0}%${ongNote} · 点击行展开棋局,点单词查词典`
+    : "完成一局后会自动保存在这里。";
+  if(!games.length && !ong.length){ list.innerHTML = `<div class="nbEmpty">还没有记录。来玩一局,结束的棋局都会存档在此。</div>`; return; }
+  list.innerHTML = ong.map(g => histRowHTML(g, {unfinished:true})).join("")
+    + games.map((g,i) => histRowHTML(g, {i})).join("");
 }
 function openHist(){ renderHist(); openOv("histOverlay"); }
 $("histList").addEventListener("click", e=>{
+  const cont = e.target.closest(".histCont");
+  if(cont && cont.dataset.gid){
+    closeOv("histOverlay"); refocusGameInput();
+    sfx.click(); resumeGame(cont.dataset.gid);
+    return;
+  }
   const it = e.target.closest(".histItem");
   const w = e.target.closest(".histW");
-  if(w && w.dataset.w){
-    const gi = it ? +it.dataset.i : -1;
-    const gl = (gi>=0 && store.history[gi] && store.history[gi].lang) || "en";
-    openDict(w.dataset.w, gl); return;
+  if(w && (w.dataset.w || w.dataset.rw)){
+    const word = w.dataset.w || w.dataset.rw;
+    const gl = w.dataset.lang || (it && it.dataset.gid && (findGame(it.dataset.gid)||{}).lang) || "en";
+    if(word) openDict(word, gl);
+    return;
   }
   if(it && e.target.closest(".histRow")) it.classList.toggle("open");
 });
 $("histClear").onclick = ()=>{
-  if(!store.history.length){ toast("还没有记录"); return; }
-  askConfirm("清空历史记录?", `将删除全部 ${store.history.length} 局存档,不可恢复。`, ()=>{
-    store.history = []; save(); renderHist(); renderHomeStats(); toast("已清空历史记录");
+  if(!store.history.length && !store.games.length){ toast("还没有记录"); return; }
+  const n = store.history.length + store.games.length;
+  askConfirm("清空历史记录?", `将删除全部 ${n} 局存档(含未完成),不可恢复。`, ()=>{
+    store.history = []; store.games = []; save(); renderHist(); renderHomeStats(); toast("已清空历史记录");
   });
 };
 $("histClose").onclick = ()=>{ closeOv("histOverlay"); refocusGameInput(); };
@@ -868,15 +1002,35 @@ function switchScreen(id){
 }
 function refreshHome(){
   renderHomeStats();
-  const canResume = !!(store.current && store.current.lo!=null && store.current.state==="ongoing" && store.current.board && store.current.board.length>0);
+  const c = latestGame();
+  const canResume = !!(c && c.board && c.board.length > 0);
   const b = $("resumeBtn");
   b.classList.toggle("show", canResume);
   if(canResume){
-    const c = store.current;
     const cl = (c.lang && LANGS[c.lang]) ? c.lang : "en";
-    b.innerHTML = `继续上局(${escHtml(cl==="de" ? c.secret : cap(c.secret))}${cl!=="en"?` · ${escHtml(LANGS[cl].name)}`:""}) · ${escHtml(LANGS[cl].badge)} ${escHtml(rangeLabelFor(c.lo, c.hi, cl))}`;
-    b.onclick = ()=>{ sfx.click(); startGame(c.lo, c.hi, true); };
+    const gc = (c.board||[]).filter(e => !e.isHint).length;
+    b.innerHTML = `继续上局 · ${escHtml(LANGS[cl].badge)} ${escHtml(rangeLabelFor(c.lo, c.hi, cl))}${cl!=="en"?` · ${escHtml(LANGS[cl].name)}`:""} · 已猜 ${gc} 次`;
+    b.onclick = ()=>{ sfx.click(); resumeGame(c.gid); };
   }
+}
+async function resumeGame(gid){
+  const g = findGame(gid);
+  if(!g) return;
+  busy = true;
+  try{
+    if(g.lang && g.lang !== LANG){
+      await ensurePack(g.lang);
+      activateLang(g.lang);
+      store.settings.lang = g.lang; save();
+      renderLangRow(); try{ refreshLvCards(); }catch(e){}
+    }
+  }catch(e){
+    busy = false;
+    toast("该语言数据加载失败,请重试");
+    return;
+  }
+  busy = false;
+  startGame(g.lo, g.hi, g.gid);
 }
 $("startBtn").onclick = ()=>{
   sfx.click();
@@ -996,44 +1150,96 @@ renderLvSel();
 $("beginBtn").onclick = ()=>{
   if(selLo==null || selHi==null) return;
   sfx.click();
-  startGame(selLo, selHi, false);
+  startGame(selLo, selHi);
 };
 
 /* ---------- game lifecycle ---------- */
-function startGame(lo, hi, resume){
-  cfg = { lo, hi, lang: LANG };
-  if(resume && store.current && store.current.lo===lo && store.current.hi===hi && store.current.state==="ongoing" && (store.current.lang||"en")===LANG){
-    secret = store.current.secret;
-    ranks = buildRanks(secret);
-    board = [];
-    for(const e of store.current.board){
-      if(IDX.has(e.word)) board.push({word:e.word, isHint:!!e.isHint, distance:ranks.distOf[ranks.rankOf.get(e.word)-1]});
+async function startGame(lo, hi, resumeGid){
+  const g = (resumeGid != null) ? findGame(resumeGid) : null;
+  cfg = { lo: g ? g.lo : lo, hi: g ? g.hi : hi, lang: LANG, gid: g ? g.gid : newGid() };
+  secret = undefined; gameToken = null; ranks = null;
+  board = []; state = "ongoing"; result = null; marker = null;
+  if(g){
+    // resume a saved game (any language): board comes back as saved
+    if(g.token && REMOTE){
+      ranks = { N, K:3000/N, remote:true };
+      gameToken = g.token;
+      board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, distance:e.d }));
+      if(board.some(e => e.r == null || e.d == null)){
+        try{
+          const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
+          board = board.map((e, i) => {
+            const it = j.items && j.items[i];
+            return it ? { word:e.word, isHint:e.isHint, r:it.r, d:it.d, distance:it.d } : e;
+          }).filter(e => e.d != null);
+        }catch(err){ toast("存档恢复失败,请重试"); return; }
+      }
+    } else if(g.secret){
+      if(REMOTE) await fallbackToLocal();     // a local-mode save needs the vector pack
+      secret = g.secret;
+      ranks = buildRanks(secret);
+      board = (g.board||[]).filter(e => IDX.has(e.word)).map(e => {
+        const r = ranks.rankOf.get(e.word);
+        return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], distance: ranks.distOf[r-1] };
+      });
+    } else {
+      toast("该存档无法继续,已移除");
+      store.games = store.games.filter(x => x.gid !== g.gid); save();
+      return;
     }
     board.sort((a,b)=>a.distance-b.distance);
-    state = "ongoing"; result = null; marker = null;
   } else {
-    secret = pickSecret(lo, hi);
-    ranks = buildRanks(secret);
-    board = []; state = "ongoing"; result = null; marker = null;
+    if(REMOTE){
+      let t = null;
+      try{ t = (await apiPost("/new", { lang: LANG, lo, hi, recent: store.recent.slice(-160) })).t; }
+      catch(e){ await fallbackToLocal(); }
+      if(t){ gameToken = t; ranks = { N, K:3000/N, remote:true }; }
+      else { secret = pickSecret(lo, hi); ranks = buildRanks(secret); }
+    } else {
+      secret = pickSecret(lo, hi);
+      ranks = buildRanks(secret);
+    }
     persistCurrent();
   }
   resultsOpen = false;
-  $("modeBadge").textContent = LANGS[LANG].badge + " " + rangeLabel(lo, hi);
+  hideResults();
+  $("modeBadge").textContent = LANGS[LANG].badge + " " + rangeLabel(cfg.lo, cfg.hi);
   switchScreen("game");
   renderAll();
   $("guessInput").focus();
+}
+// online engine unreachable (offline / server error): degrade to the local vector engine
+async function fallbackToLocal(){
+  if(!window.__loadLang){ toast("在线引擎不可用,请检查网络后重试"); return; }
+  REMOTE = false;
+  toast("在线引擎暂不可用,已切换为本地词库模式");
+  try{
+    await window.__loadLang(LANG, f => toast("正在下载本地词库 " + Math.round(f*100) + "%"));
+    delete packCache[LANG];
+    getPack(LANG);
+    activateLang(LANG);
+  }catch(e){ toast("本地词库下载失败,请检查网络"); }
 }
 
 /* ---------- results buttons ---------- */
 $("resultsBtn").onclick = ()=>{ sfx.click(); showResults(); };
 $("resWord").onclick = ()=>{ if(secret) openDict(secret); };
 $("boardBtn").onclick = ()=>{ if(!cfg) return; hideResults(); };
-$("newWordBtn").onclick = ()=>{
+$("newWordBtn").onclick = async ()=>{
   if(!cfg) return;
   sfx.click();
   hideResults();
-  secret = pickSecret(cfg.lo, cfg.hi);
-  ranks = buildRanks(secret);
+  cfg.gid = newGid();
+  secret = undefined; gameToken = null;
+  if(REMOTE){
+    let t = null;
+    try{ t = (await apiPost("/new", { lang: LANG, lo: cfg.lo, hi: cfg.hi, recent: store.recent.slice(-160) })).t; }catch(e){}
+    if(t){ gameToken = t; ranks = { N, K:3000/N, remote:true }; }
+    else { secret = pickSecret(cfg.lo, cfg.hi); ranks = buildRanks(secret); }
+  } else {
+    secret = pickSecret(cfg.lo, cfg.hi);
+    ranks = buildRanks(secret);
+  }
   board = []; state = "ongoing"; result = null; marker = null;
   persistCurrent();
   renderAll();
@@ -1098,11 +1304,9 @@ async function selectLang(lang){
   if(lang===LANG || !LANGS[lang]) return;
   if(!packAvailable(lang)){
     const btn = document.querySelector(`.langBtn[data-lang="${lang}"]`);
-    if(window.__loadLang){
-      if(btn) btn.classList.add("busy");
-      try{ await window.__loadLang(lang); }catch(e){}
-      if(btn) btn.classList.remove("busy");
-    }
+    if(btn) btn.classList.add("busy");
+    try{ await ensurePack(lang); }catch(e){}
+    if(btn) btn.classList.remove("busy");
     if(!packAvailable(lang)){ toast("该语言数据加载失败,请重试"); return; }
   }
   sfx.click();
@@ -1114,13 +1318,14 @@ async function selectLang(lang){
 }
 
 /* ---------- boot ---------- */
+REMOTE = !!(window.__gwRemote && typeof fetch === "function");
 applyTheme();
 syncSoundUI();
 syncAcUI();
 $("histHomeBtn").innerHTML = IC.clock;
 $("nbHomeBtn").innerHTML = IC.book;
 $("dlHomeBtn").innerHTML = IC.search;
-loadDict();
+if(!REMOTE) loadDict();
 switchScreen("home");
 refreshHome();
 renderLangRow();
@@ -1128,8 +1333,10 @@ $("demoTrophy").innerHTML = IC.trophy;
 $("dictCount").textContent = N.toLocaleString("en-US");
 $("secretCount").textContent = LVIDX.filter(l=>l<=5).length.toLocaleString("en-US");
 window.__gw = {
-  get answer(){ return secret; },
-  rankOf: w => ranks && ranks.rankOf.get(w),
-  distOf: r => ranks && ranks.distOf[r-1],
+  get answer(){ return secret || null; },
+  get token(){ return gameToken; },
+  remote: () => REMOTE,
+  rankOf: w => ranks && ranks.rankOf ? ranks.rankOf.get(w) : undefined,
+  distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
   info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)})
 };

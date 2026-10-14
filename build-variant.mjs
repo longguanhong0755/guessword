@@ -1,10 +1,14 @@
 // Build the split/parallel-load MULTILINGUAL deploy variant of GuessWord from the split sources
 // (index.html + css/app.css + js/data-*.js + js/app.js, composed by build/compose.mjs).
-// Sources stay untouched; output goes to site/ (index.html + data/* + _headers).
+// Sources stay untouched; output goes to site/ (index.html + data/* + functions/* + _headers).
 // Usage: node build-variant.mjs [secondary-data-origin]
 //   Secondary origin (e.g. https://<hash>.guessword-173.pages.dev) gives the browser a second
-//   TCP flow for chunk downloads (~2x cold-boot throughput on lossy links).
+//   TCP flow for the fallback chunk downloads (~2x cold-boot throughput on lossy links).
+// Online mode ranks words server-side (functions/api/*, copied from functions/), so the
+// browser only fetches the lightweight word lists. The vector/dict chunks stay on /data as
+// the offline fallback path (window.__loadLang) when the API is unavailable.
 // Per language L: data/gw-<L>-meta.json + data/gw-<L>-vec-<i>.bin + data/gwdict-<L>-<i>.bin
+//               + data/gwdb-<L>-<b>.bin (dictionary buckets, 256 per language, for /api/def)
 // en/ja/ko packs live in js/data-*.js; fr/de/es come from D:/gw-dl/lang/pack-<L>.json + dict-<L>.json.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -108,7 +112,7 @@ lines.splice(li, le - li + 1, NEW_LOAD);
 const boi = find(l => l.includes('---------- boot ----------'));
 lines.splice(boi + 1, 0, 'function __boot(){');
 {
-  const ldi = find(l => l === 'loadDict();', boi);
+  const ldi = find(l => l === 'if(!REMOTE) loadDict();', boi);
   lines.splice(ldi, 1);
 }
 const sc = find(l => l === '</script>');
@@ -130,11 +134,30 @@ for (const L of CHUNK_LANGS) {
   for (let i = 0; i < nd; i++) {
     fs.writeFileSync(path.join(OUT, 'data', `gwdict-${L}-${i}.bin`), gz.subarray(i * CHUNK_BYTES, Math.min((i + 1) * CHUNK_BYTES, gz.length)));
   }
-  if (L !== 'en') {   // en metadata stays embedded in the shell
-    fs.writeFileSync(path.join(OUT, 'data', `gw-${L}-meta.json`),
-      JSON.stringify({ N: P.N, D: P.D, words: P.words, level: P.level, min: P.min, max: P.max, chunks: nv }));
-  }
+  // meta for every language: the browser uses it as the lightweight word list,
+  // and the server-side engine (/api) loads words + vectors from the same file.
+  fs.writeFileSync(path.join(OUT, 'data', `gw-${L}-meta.json`),
+    JSON.stringify({ N: P.N, D: P.D, words: P.words, level: P.level, min: P.min, max: P.max, chunks: nv }));
   console.log(`${L}: vec ${(vec.length / 1048576).toFixed(2)}MB/${nv} chunks | dict ${(gz.length / 1048576).toFixed(2)}MB/${nd} chunks`);
+}
+
+// ---- dictionary buckets for /api/def (per-word lookups without downloading whole dicts) ----
+const BUCKETS = 256;
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+let bucketCount = 0;
+for (const L of CHUNK_LANGS) {
+  const dict = JSON.parse(zlib.gunzipSync(DICTS[L]));
+  const buckets = Array.from({ length: BUCKETS }, () => ({}));
+  for (const [w, e] of Object.entries(dict)) buckets[fnv1a(w) % BUCKETS][w] = e;
+  for (let b = 0; b < BUCKETS; b++) {
+    fs.writeFileSync(path.join(OUT, 'data', `gwdb-${L}-${b}.bin`), zlib.gzipSync(JSON.stringify(buckets[b]), { level: 9 }));
+  }
+  bucketCount += BUCKETS;
+  console.log(`${L}: dict buckets ${BUCKETS} (${(Object.keys(dict).length / 1000).toFixed(1)}k entries)`);
 }
 
 // ---- loader overlay + script ----
@@ -191,6 +214,21 @@ const OVERLAY = [
   '    else if(L==="de"){ GW_DE=obj; }',
   '    else if(L==="es"){ GW_ES=obj; }',
   '  }',
+  '  function packRef(L){',
+  '    if(L==="en") return GWD;',
+  '    if(L==="ja") return GW_JA; if(L==="ko") return GW_KO;',
+  '    if(L==="fr") return GW_FR; if(L==="de") return GW_DE; if(L==="es") return GW_ES;',
+  '    return null;',
+  '  }',
+  '  window.__gwRemote = true;',
+  '  window.__gwPackRef = packRef;',
+  '  window.__loadMeta = function(L){',
+  '    if(LANGS.indexOf(L)<0) return Promise.reject(new Error("unknown lang"));',
+  '    if(L==="en") return Promise.resolve(GWD);',
+  '    var cur = packRef(L);',
+  '    if(cur && cur.vec === undefined) return Promise.resolve(cur);',
+  '    return fetchJson("/data/gw-"+L+"-meta.json?"+window.__gwVER).then(function(m){ setPack(L, m); return m; });',
+  '  };',
   '  function loadPack(L, onProg){',
   '    var metaP = (L==="en") ? Promise.resolve(null) : fetchJson("/data/gw-"+L+"-meta.json?"+window.__gwVER);',
   '    return metaP.then(function(meta){',
@@ -236,10 +274,9 @@ const OVERLAY = [
   '    }',
   '  }',
   '  function run(L){',
-  '    retry.style.display="none"; prog(0.02,"正在加载词库…");',
-  '    loadPack(L, function(f){ prog(0.03+f*0.93, "正在加载词库 "+Math.round(f*100)+"%"); }).then(function(){',
-  '      if(L!=="en") window["__gwp_"+L]=1;',
-  '      prog(0.98,"启动中…");',
+  '    retry.style.display="none"; prog(0.02,"正在启动…");',
+  '    window.__loadMeta(L).then(function(){',
+  '      prog(0.9,"启动中…");',
   '      activateLang(L);',
   '      __boot();',
   '      prog(1,"完成");',
@@ -260,6 +297,17 @@ fs.writeFileSync(path.join(OUT, '_headers'),
   '/data/*\n  Cache-Control: public, max-age=31536000, immutable\n  Access-Control-Allow-Origin: *\n');
 fs.copyFileSync(WRANGLER_TOML, path.join(OUT, 'wrangler.toml'));
 
+// ---- Pages Functions: the online ranking/dictionary engine (/api/*) ----
+{
+  const SRC_FN = path.join(ROOT, 'functions');
+  const dst = path.join(OUT, 'functions');
+  fs.mkdirSync(path.join(dst, 'api'), { recursive: true });
+  for (const f of fs.readdirSync(path.join(SRC_FN, 'api'))) {
+    const text = fs.readFileSync(path.join(SRC_FN, 'api', f), 'utf8').replaceAll('__GW_VER__', VER);
+    fs.writeFileSync(path.join(dst, 'api', f), text);
+  }
+}
+
 const st = p => (fs.statSync(p).size / 1048576).toFixed(2) + 'MB';
 console.log('index.html:', st(path.join(OUT, 'index.html')), '| SECHOST:', SECHOST || '(same-origin)');
-console.log('data files:', fs.readdirSync(path.join(OUT, 'data')).length);
+console.log('data files:', fs.readdirSync(path.join(OUT, 'data')).length, `(${bucketCount} dict buckets)`);
