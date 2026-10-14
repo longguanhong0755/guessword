@@ -156,6 +156,14 @@ with sync_playwright() as p:
     pg.wait_for_function("(document.getElementById('resWord')||{}).textContent", timeout=40000)
     pg.wait_for_timeout(300)
     result["win_result_word"] = pg.evaluate("(document.getElementById('resWord')||{textContent:''}).textContent")
+    result["rank_chart"] = pg.evaluate("""(() => ({
+        hasSvg: !!document.querySelector('#rankChart svg'),
+        points: document.querySelectorAll('#rankChart .rcDot, #rankChart .rcHint, #rankChart .rcWin').length,
+        boardRows: document.querySelectorAll('#board .row').length,
+        hints: document.querySelectorAll('#rankChart .rcHint').length,
+        firstTip: (document.querySelector('#rankChart title')||{textContent:''}).textContent,
+        cap: document.getElementById('chartCap').textContent
+    }))()""")
     pg.evaluate("document.getElementById('histHomeBtn').click()")
     pg.wait_for_timeout(400)
     result["hist_after_win"] = pg.evaluate("""(() => ({

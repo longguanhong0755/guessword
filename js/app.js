@@ -218,7 +218,7 @@ function persistCurrent(){
   if(!cfg || state !== "ongoing") return;
   if(REMOTE && !gameToken) return;   // /api/new still in flight: nothing to save yet
   const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
-                board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null) })),
+                board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null), n:(e.n||null) })),
                 at: Date.now() };
   if(REMOTE) rec.token = gameToken; else rec.secret = secret;
   const rest = store.games.filter(g => g.gid !== cfg.gid);
@@ -404,6 +404,7 @@ function applyEntry(entry){
     marker = dup.distance;
     renderAll(); return;
   }
+  entry.n = board.reduce((m,x)=>Math.max(m, x.n||0), 0) + 1;   // 第几猜（结果页名次曲线的横轴）
   result = {type:"success", guess:entry};
   board = [...board, entry].sort((a,b)=>a.distance-b.distance);
   marker = entry.distance;
@@ -539,40 +540,55 @@ function hideResults(){
   $("gameView").style.display = "block";
 }
 function historyStats(){
-  const buckets = [{label:"<9",min:1,max:9},{label:"10s",min:10,max:19},{label:"20s",min:20,max:29},{label:"30s",min:30,max:39},{label:"40s",min:40,max:49},{label:"50s",min:50,max:59},{label:"60s",min:60,max:69},{label:"70s",min:70,max:79},{label:"80s",min:80,max:89},{label:"90s",min:90,max:99},{label:"100+",min:100,max:1000},{label:"X",min:1001,max:1e9}];
-  const counts = buckets.map(()=>0);
   let played=0, wins=0, sum=0;
-  const all = store.history;
-  for(const g of all){
+  for(const g of store.history){
     if(g.state!=="won" && g.state!=="lost") continue;
     played++;
-    const gc = (g.board||[]).filter(e=>!e.isHint).length;
-    if(g.state==="won"){
-      wins++; sum += gc;
-      const i = buckets.findIndex(x => Math.min(gc,100)>=x.min && Math.min(gc,100)<=x.max);
-      if(i>=0) counts[i]++;
-    } else counts[buckets.length-1]++;
+    if(g.state==="won"){ wins++; sum += (g.board||[]).filter(e=>!e.isHint).length; }
   }
-  return {played, wins, avg: wins? (sum/wins):0, buckets, counts};
+  return {played, wins, avg: wins? (sum/wins):0};
+}
+// 本局每次猜测的名次曲线（横轴=第几猜，纵轴=该词在词库中的绝对名次，对数刻度，1 在顶部）
+function rankCurveSVG(){
+  const pts = board
+    .map(e => ({ w:e.word, n:e.n||0, r:(e.r!=null ? e.r : null), hint:!!e.isHint }))
+    .filter(p => p.r != null && p.r >= 1);
+  if(!pts.length) return "";
+  pts.sort((a,b) => (a.n||0) - (b.n||0));
+  let last = 0;
+  for(const p of pts){ if(!p.n) p.n = last + 1; last = p.n; }   // 老存档没有次序时按现有顺序补
+  const NMAX = Math.max(2, N);
+  const W = 520, H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
+  const xs = n => pts.length <= 1 ? (PL + W - PR) / 2 : PL + (n-1)/(pts[pts.length-1].n - 1) * (W - PL - PR);
+  const ys = r => PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (H - PT - PB);
+  const ticks = [1, 10, 100, 1000].filter(t => t < NMAX).concat([NMAX]);
+  const grid = ticks.map(t =>
+    `<line class="rcGrid" x1="${PL}" y1="${ys(t).toFixed(1)}" x2="${W-PR}" y2="${ys(t).toFixed(1)}"/>` +
+    `<text class="rcTick" x="${PL-8}" y="${(ys(t) + (t===NMAX ? -5 : 3.5)).toFixed(1)}">${fmt(t)}</text>`).join("");
+  const line = pts.length > 1
+    ? `<polyline class="rcLine" points="${pts.map(p => xs(p.n).toFixed(1)+","+ys(p.r).toFixed(1)).join(" ")}"/>` : "";
+  const hits = pts.map(p =>
+    `<circle class="rcHit" cx="${xs(p.n).toFixed(1)}" cy="${ys(p.r).toFixed(1)}" r="15" data-w="${escHtml(p.w)}"/>`).join("");
+  const dots = pts.map(p => {
+    const x = xs(p.n).toFixed(1), y = ys(p.r).toFixed(1);
+    const tip = `<title>第 ${p.n} 猜${p.hint?"(提示)":""}:${escHtml(cap(p.w))} · 第 ${fmt(p.r)} 名</title>`;
+    if(p.r === 1) return `<circle class="rcWin" cx="${x}" cy="${y}" r="7.5" data-w="${escHtml(p.w)}">${tip}</circle>`;
+    if(p.hint)    return `<rect class="rcHint" x="${(x-5.2).toFixed(1)}" y="${(y-5.2).toFixed(1)}" width="10.4" height="10.4" transform="rotate(45 ${x} ${y})" data-w="${escHtml(p.w)}">${tip}</rect>`;
+    return `<circle class="rcDot" cx="${x}" cy="${y}" r="4.6" data-w="${escHtml(p.w)}">${tip}</circle>`;
+  }).join("");
+  const endN = pts[pts.length-1].n;
+  const xlab = `<text class="rcTick rcX" x="${PL}" y="${H-4}">第1猜</text>`
+    + (endN > 1 ? `<text class="rcTick rcX" x="${W-PR-10}" y="${H-4}">第${endN}猜</text>` : "");
+  return `<svg class="rankSvg" viewBox="0 0 ${W} ${H}" role="img" aria-label="本局每次猜测的名次曲线">${grid}${line}${hits}${dots}${xlab}</svg>`;
 }
 function renderStats(){
   const h = historyStats();
   $("statSub").textContent = h.played===0 ? "还没有记录,来玩一局吧!"
     : (h.wins ? `已完成 ${h.played} 局 · 胜率 ${Math.round(h.wins/h.played*100)}% · 平均 ${h.avg.toFixed(1)} 次猜中`
               : `已完成 ${h.played} 局 · 快来赢下第一局!`);
-  const curGc = recalcMetrics();
-  const curBucket = state==="lost" ? h.buckets.length-1
-    : h.buckets.findIndex(x => Math.min(curGc,100)>=x.min && Math.min(curGc,100)<=x.max);
-  const max = Math.max(1, ...h.counts);
-  const isDone = state==="won"||state==="lost";
-  $("distChart").innerHTML = h.buckets.map((b,i)=>{
-    const c = h.counts[i];
-    const pct = c===0 ? 0 : Math.max(7, Math.round(c/max*100));
-    const me = (i===curBucket && isDone) ? " me" : "";
-    const white = b.label==="100+"||b.label==="X" ? " white" : "";
-    return `<div class="cb${white}${me}" title="${c}"><div class="cnt">${c||""}</div><div class="bar" style="height:${c? pct : 2}%"></div></div>`;
-  }).join("");
-  $("distLbls").innerHTML = h.buckets.map(b=>`<span>${b.label}</span>`).join("");
+  const svg = rankCurveSVG();
+  $("rankChart").innerHTML = svg || '<div class="rcEmpty">本局还没有可绘制的猜测记录。</div>';
+  $("chartCap").textContent = svg ? "本局每次猜测的名次(纵轴:1 = 答案,越靠上越接近,对数刻度) · 橙色菱形为提示 · 点圆点查词典" : "";
 }
 function renderHomeStats(){
   const h = historyStats();
@@ -868,6 +884,10 @@ $("dictItem").onclick = ()=>{ $("dropdown").classList.remove("open"); openDict("
 document.addEventListener("click", e=>{
   const t = e.target.closest(".rowWord");
   if(t && t.dataset.w) openDict(t.dataset.w);
+});
+document.addEventListener("click", e=>{
+  const c = e.target.closest(".rankSvg .rcDot, .rankSvg .rcHint, .rankSvg .rcWin");
+  if(c && c.dataset.w) openDict(c.dataset.w);
 });
 
 /* ---------- history ---------- */
@@ -1218,13 +1238,13 @@ async function startGame(lo, hi, resumeGid){
         busy = true;
         ranks = { N, K:3000/N, remote:true };
         gameToken = g.token;
-        board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, distance:e.d }));
+        board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, n:e.n, distance:e.d }));
         if(board.some(e => e.r == null || e.d == null)){
           try{
             const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
-            board = board.map((e, i) => {
-              const it = j.items && j.items[i];
-              return it ? { word:e.word, isHint:e.isHint, r:it.r, d:it.d, distance:it.d } : e;
+            board = (j.items || []).map((it, i) => {   // the API answers in request order
+              const e = board[i];
+              return it ? { ...e, r:it.r, d:it.d, distance:it.d } : e;
             }).filter(e => e.d != null);
           }catch(err){ toast("存档恢复失败,请重试"); ready = false; }
         }
@@ -1234,7 +1254,7 @@ async function startGame(lo, hi, resumeGid){
         ranks = buildRanks(secret);
         board = (g.board||[]).filter(e => IDX.has(e.word)).map(e => {
           const r = ranks.rankOf.get(e.word);
-          return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], distance: ranks.distOf[r-1] };
+          return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], n: e.n, distance: ranks.distOf[r-1] };
         });
       } else {
         toast("该存档无法继续,已移除");

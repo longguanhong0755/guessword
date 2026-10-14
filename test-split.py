@@ -115,6 +115,31 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1500)
     result["dict_ko"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,240)")
 
+
+    # ---- results screen: rank curve of this game's guesses (local engine) ----
+    pg.evaluate("document.getElementById('dlClose').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('homeBtn').click()")
+    pg.wait_for_timeout(350)
+    if pg.evaluate("document.getElementById('confirmOverlay').classList.contains('open')"):
+        pg.evaluate("document.getElementById('confirmYes').click()")
+        pg.wait_for_timeout(500)
+    pg.evaluate("document.getElementById('resumeBtn').click()")
+    pg.wait_for_timeout(1500)
+    pg.evaluate("document.getElementById('menuBtn').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('giveupItem').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('confirmYes').click()")
+    pg.wait_for_function("document.getElementById('resultsView').style.display === 'block'", timeout=30000)
+    pg.wait_for_timeout(400)
+    result["rank_chart"] = pg.evaluate("""(() => ({
+        hasSvg: !!document.querySelector('#rankChart svg'),
+        points: document.querySelectorAll('#rankChart .rcDot, #rankChart .rcHint, #rankChart .rcWin').length,
+        boardRows: document.querySelectorAll('#board .row').length,
+        firstTip: (document.querySelector('#rankChart title')||{textContent:''}).textContent
+    }))()""")
+
     b.close()
 
 print(json.dumps(result, ensure_ascii=False, indent=1))
