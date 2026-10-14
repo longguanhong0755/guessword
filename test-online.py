@@ -76,7 +76,8 @@ with sync_playwright() as p:
     result["acClickValue_en"] = pg.evaluate("document.getElementById('guessInput').value")
     m = len(REQS)
     pg.press("#guessInput", "Enter")
-    pg.wait_for_timeout(1500)
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 1", timeout=40000)
+    pg.wait_for_timeout(300)
     result["api_guess_called"] = any("/api/guess" in r for r in reqs_since(m))
     result["boardRow1"] = pg.evaluate("(document.querySelector('#board .row:last-child')||{innerText:''}).innerText.replace(/\\n+/g,' | ').slice(0,130)")
 
@@ -85,7 +86,8 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('menuBtn').click()")
     pg.wait_for_timeout(250)
     pg.evaluate("document.getElementById('hintItem').click()")
-    pg.wait_for_timeout(1600)
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 2", timeout=40000)
+    pg.wait_for_timeout(300)
     result["api_hint_called"] = any("/api/hint" in r for r in reqs_since(m))
     result["boardRows_after_hint"] = pg.evaluate("document.querySelectorAll('#board .row').length")
     result["hint_row"] = pg.evaluate("(() => { const r=document.querySelector('#board .hintIc'); return r ? r.closest('.row').innerText.replace(/\\n+/g,' | ').slice(0,100) : null; })()")
@@ -93,7 +95,8 @@ with sync_playwright() as p:
     # dictionary of the first guessed word (click the board word)
     m = len(REQS)
     pg.evaluate("document.querySelector('#board .rowWord').click()")
-    pg.wait_for_timeout(1500)
+    pg.wait_for_function("document.querySelectorAll('#dlEntry .dlDef').length > 0", timeout=40000)
+    pg.wait_for_timeout(200)
     result["api_def_called"] = any("/api/def" in r for r in reqs_since(m))
     result["dict_en"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,220)")
     result["dict_en_has_content"] = pg.evaluate("document.querySelectorAll('#dlEntry .dlDef').length > 0")
@@ -138,7 +141,7 @@ with sync_playwright() as p:
     pg.press("#guessInput", "Tab")
     pg.wait_for_timeout(200)
     pg.press("#guessInput", "Enter")
-    pg.wait_for_timeout(1500)
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 3", timeout=40000)
     result["api_guess_after_resume"] = any("/api/guess" in r for r in reqs_since(m))
     result["board_rows_after_resume_guess"] = pg.evaluate("document.querySelectorAll('#board .row').length")
 
@@ -150,7 +153,8 @@ with sync_playwright() as p:
     result["secret_via_api"] = secret
     pg.fill("#guessInput", secret)
     pg.press("#guessInput", "Enter")
-    pg.wait_for_timeout(2200)
+    pg.wait_for_function("(document.getElementById('resWord')||{}).textContent", timeout=40000)
+    pg.wait_for_timeout(300)
     result["win_result_word"] = pg.evaluate("(document.getElementById('resWord')||{textContent:''}).textContent")
     pg.evaluate("document.getElementById('histHomeBtn').click()")
     pg.wait_for_timeout(400)
@@ -188,11 +192,11 @@ with sync_playwright() as p:
     pg.evaluate("document.querySelector('#acBox .acItem').click()")
     pg.wait_for_timeout(250)
     pg.press("#guessInput", "Enter")
-    pg.wait_for_timeout(1600)
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 1", timeout=40000)
     result["boardRow_ja"] = pg.evaluate("(document.querySelector('#board .row:last-child')||{innerText:''}).innerText.replace(/\\n+/g,' | ').slice(0,120)")
     # japanese dictionary through the API
     pg.evaluate("document.querySelector('#board .rowWord').click()")
-    pg.wait_for_timeout(1500)
+    pg.wait_for_function("document.querySelectorAll('#dlEntry .dlDef').length > 0", timeout=40000)
     result["dict_ja_zh"] = pg.evaluate("""(() => {
         const defs=[...document.querySelectorAll('#dlEntry .dlDef')].map(e=>e.innerText);
         const cjk=defs.filter(t=>/[\\u4e00-\\u9fff]/.test(t));
@@ -256,6 +260,48 @@ with sync_playwright() as p:
     result["resume_ja_rows"] = pg.evaluate("document.querySelectorAll('#board .row').length")
     result["resume_ja_badge"] = pg.evaluate("document.getElementById('modeBadge').textContent")
     result["resume_ja_lang"] = pg.evaluate("document.querySelector('.langBtn.on').dataset.lang")
+
+    # ---------- start-game responsiveness: slow /api/new must not lock the UI ----------
+    ctx3 = b.new_context(viewport={"width": 430, "height": 880})
+    pg3 = ctx3.new_page()
+    errs3 = []
+    pg3.on("pageerror", lambda e: errs3.append("pageerror: " + str(e)))
+    slow_new = {"on": False}
+
+    def _slow_new(route):
+        if slow_new["on"]:
+            time.sleep(2.5)
+        route.continue_()
+
+    pg3.route("**/api/new", _slow_new)
+    pg3.goto(URL, wait_until="domcontentloaded")
+    pg3.wait_for_function("document.getElementById('dictCount') && document.getElementById('dictCount').textContent !== '…'", timeout=60000)
+    pg3.wait_for_timeout(600)
+    slow_new["on"] = True
+    pg3.evaluate("document.getElementById('startBtn').click()")
+    pg3.wait_for_timeout(300)
+    pg3.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg3.wait_for_timeout(120)
+    pg3.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg3.wait_for_timeout(120)
+    result["slow_new_click"] = pg3.evaluate("""() => {
+        const t0 = performance.now();
+        document.getElementById('beginBtn').click();
+        return { ms: Math.round(performance.now() - t0),
+                 screen: document.querySelector('.screen.on').id,
+                 inputEnabled: !document.getElementById('guessInput').disabled,
+                 preparing: !!document.querySelector('#resultArea .msgRow.loading') };
+    }""")
+    # type and submit before the secret has arrived: the guess must wait for it and succeed
+    pg3.fill("#guessInput", "whi")
+    pg3.wait_for_timeout(250)
+    pg3.press("#guessInput", "Tab")
+    pg3.wait_for_timeout(150)
+    pg3.press("#guessInput", "Enter")
+    pg3.wait_for_function("document.querySelectorAll('#board .row').length > 0", timeout=40000)
+    result["slow_new_guess_row"] = pg3.evaluate("(document.querySelector('#board .row:last-child')||{innerText:''}).innerText")
+    result["slow_new_errors"] = errs3[:5]
+    ctx3.close()
 
     # ---------- fallback: /api unreachable -> local vector engine ----------
     ctx2 = b.new_context()

@@ -22,11 +22,36 @@ function phText(){ return "输入一个" + langCn() + "单词"; }
 /* ---------- online engine (deploy build: ranking + dictionary served by /api) ---------- */
 let REMOTE = false;      // set during boot when the deploy loader is present (window.__gwRemote)
 let gameToken = null;    // remote game handle — the secret stays server-side, encrypted inside it
+let pendingNew = null;   // in-flight /api/new for the current game (the player may type while it loads)
 function apiURL(path){ return (window.__gwAPI || "/api") + path; }
-function apiPost(path, data){
-  return fetch(apiURL(path), { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(data || {}) })
-    .then(r => { if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
-    .then(j => { if(j && j.err) throw new Error(j.err); return j; });
+// one retry on network hiccups / 5xx (the China route to the edge is occasionally lossy)
+function apiPost(path, data, tries){
+  const left0 = tries || 2;
+  return new Promise((resolve, reject) => {
+    const run = (left) => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 10000);
+      fetch(apiURL(path), { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(data || {}), signal: ctl.signal })
+        .then(r => { clearTimeout(timer); if(!r.ok){ const e = new Error("HTTP "+r.status); e.http = r.status; throw e; } return r.json(); })
+        .then(j => { if(j && j.err) throw new Error(j.err); resolve(j); })
+        .catch(e => {
+          clearTimeout(timer);
+          const retriable = !e.http || e.http >= 500;
+          if(left > 1 && retriable) run(left - 1); else reject(e);
+        });
+    };
+    run(left0);
+  });
+}
+// preload a language on the server (fire and forget): the first guess of a
+// game then skips the vector decode on a cold isolate
+const WARMED = {};
+function warmLang(lang){
+  if(!REMOTE) return;
+  lang = lang || LANG;
+  if(WARMED[lang] && Date.now() - WARMED[lang] < 8*60*1000) return;   // don't stack heavy warms
+  WARMED[lang] = Date.now();
+  try{ apiPost("/warm", { lang }).catch(()=>{}); }catch(e){}
 }
 const PACK_SRC = { en:()=>GWD, ja:()=>GW_JA, ko:()=>GW_KO, fr:()=>GW_FR, de:()=>GW_DE, es:()=>GW_ES };
 const PACK_MAP = { en:()=>GWMAP };
@@ -191,6 +216,7 @@ function findGame(gid){ return store.games.find(g => g.gid === gid) || null; }
 function latestGame(){ return store.games.length ? store.games[store.games.length-1] : null; }
 function persistCurrent(){
   if(!cfg || state !== "ongoing") return;
+  if(REMOTE && !gameToken) return;   // /api/new still in flight: nothing to save yet
   const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
                 board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null) })),
                 at: Date.now() };
@@ -331,6 +357,7 @@ function renderResultArea(){
   const ra = $("resultArea");
   if(result){
     if(result.type==="loading") ra.innerHTML = '<div class="msgRow loading">思考中...</div>';
+    else if(result.type==="preparing") ra.innerHTML = '<div class="msgRow loading">正在准备神秘词…</div>';
     else if(result.type==="error") ra.innerHTML = `<div class="msgRow">${result.msg}</div>`;
     else if(result.type==="success"){ ra.innerHTML = rowHTML(result.guess, true); animateRows(ra); }
     return;
@@ -421,6 +448,11 @@ async function submitGuess(raw){
   renderInputRow(); renderResultArea();
   let r, d;
   if(REMOTE){
+    if(!gameToken && !(await ensureToken())){
+      busy = false;
+      result = {type:"error", msg:"网络异常,请重试"};
+      sfx.error(); renderResultArea(); return false;
+    }
     let it = null;
     try{
       const j = await apiPost("/guess", { t: gameToken, words:[word] });
@@ -451,6 +483,11 @@ async function requestHint(giveUp){
   busy = true;
   result = {type:"loading"};
   renderInputRow(); renderResultArea();
+  if(REMOTE && !gameToken && !(await ensureToken())){
+    busy = false;
+    result = {type:"error", msg:"网络异常,请重试"};
+    sfx.error(); renderResultArea(); return;
+  }
   const tr = giveUp ? 1 : pickHintRank(false);
   if(tr == null){
     busy = false;
@@ -867,10 +904,11 @@ function histRowHTML(g, opts){
   const gc = (g.board||[]).filter(e=>!e.isHint).length;
   if(opts && opts.unfinished){
     return `<div class="histItem histOng" data-gid="${escHtml(g.gid)}">
-      <div class="histRow"><span class="histSt o">${IC.clock}</span>
-      <span class="histW"${g.secret?` data-rw="${escHtml(g.secret)}"`:""}>未完成的对局<i class="histLang">${escHtml(LANGS[gl].name)}</i></span>
-      <span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span>
-      <span class="histMeta">已猜 ${gc} · ${fmtWhen(g.at)}</span>
+      <div class="histRow ongRow"><span class="histSt o">${IC.clock}</span>
+      <div class="ongMain">
+        <div class="ongTop"><span class="histW">${escHtml(LANGS[gl].name)}</span><span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span></div>
+        <div class="ongSub">已猜 ${gc} 次 · ${fmtWhen(g.at)}</div>
+      </div>
       <button type="button" class="histCont" data-gid="${escHtml(g.gid)}">继续</button>
       <span class="histChev">${IC.chevR}</span></div>
       <div class="histDet"><div class="hRows">${histGameRows(g)}</div></div>
@@ -885,17 +923,21 @@ function histRowHTML(g, opts){
       <div class="histDet"><div class="hRows">${histGameRows(g)}</div></div>
     </div>`;
 }
+function histSecHTML(label){
+  return `<div class="histSec">${label}</div>`;
+}
 function renderHist(){
   const games = store.history, list = $("histList");
   const wins = games.filter(g=>g.state==="won").length;
   const ong = store.games.slice().reverse();
-  const ongNote = ong.length ? ` · ${ong.length} 局未完成,点“继续”接着玩` : "";
-  $("histSub").textContent = (games.length || ong.length)
-    ? `共 ${games.length} 局 · 胜 ${wins} · 胜率 ${games.length? Math.round(wins/games.length*100) : 0}%${ongNote} · 点击行展开棋局,点单词查词典`
-    : "完成一局后会自动保存在这里。";
+  const parts = [];
+  if(ong.length) parts.push(`${ong.length} 局未完成`);
+  if(games.length) parts.push(`已完成 ${games.length} 局 · 胜 ${wins} · 胜率 ${Math.round(wins/games.length*100)}%`);
+  $("histSub").textContent = parts.length ? parts.join(" · ") : "完成一局后会自动保存在这里。";
   if(!games.length && !ong.length){ list.innerHTML = `<div class="nbEmpty">还没有记录。来玩一局,结束的棋局都会存档在此。</div>`; return; }
-  list.innerHTML = ong.map(g => histRowHTML(g, {unfinished:true})).join("")
-    + games.map((g,i) => histRowHTML(g, {i})).join("");
+  list.innerHTML =
+      (ong.length ? histSecHTML(`未完成的对局 · ${ong.length} · 点“继续”接着玩`) + ong.map(g => histRowHTML(g, {unfinished:true})).join("") : "")
+    + (games.length ? histSecHTML(`已完成 · ${games.length}`) + games.map((g,i) => histRowHTML(g, {i})).join("") : "");
 }
 function openHist(){ renderHist(); openOv("histOverlay"); }
 $("histList").addEventListener("click", e=>{
@@ -1038,6 +1080,7 @@ $("startBtn").onclick = ()=>{
   refreshLvCards();
   renderLvSel();
   switchScreen("setup");
+  warmLang();   // preload the language while the player picks a level range
 };
 $("backHome").onclick = ()=>{ switchScreen("home"); refreshHome(); };
 const LV_META = {
@@ -1159,54 +1202,83 @@ async function startGame(lo, hi, resumeGid){
   cfg = { lo: g ? g.lo : lo, hi: g ? g.hi : hi, lang: LANG, gid: g ? g.gid : newGid() };
   secret = undefined; gameToken = null; ranks = null;
   board = []; state = "ongoing"; result = null; marker = null;
-  if(g){
-    // resume a saved game (any language): board comes back as saved
-    if(g.token && REMOTE){
-      ranks = { N, K:3000/N, remote:true };
-      gameToken = g.token;
-      board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, distance:e.d }));
-      if(board.some(e => e.r == null || e.d == null)){
-        try{
-          const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
-          board = board.map((e, i) => {
-            const it = j.items && j.items[i];
-            return it ? { word:e.word, isHint:e.isHint, r:it.r, d:it.d, distance:it.d } : e;
-          }).filter(e => e.d != null);
-        }catch(err){ toast("存档恢复失败,请重试"); return; }
-      }
-    } else if(g.secret){
-      if(REMOTE) await fallbackToLocal();     // a local-mode save needs the vector pack
-      secret = g.secret;
-      ranks = buildRanks(secret);
-      board = (g.board||[]).filter(e => IDX.has(e.word)).map(e => {
-        const r = ranks.rankOf.get(e.word);
-        return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], distance: ranks.distOf[r-1] };
-      });
-    } else {
-      toast("该存档无法继续,已移除");
-      store.games = store.games.filter(x => x.gid !== g.gid); save();
-      return;
-    }
-    board.sort((a,b)=>a.distance-b.distance);
-  } else {
-    if(REMOTE){
-      let t = null;
-      try{ t = (await apiPost("/new", { lang: LANG, lo, hi, recent: store.recent.slice(-160) })).t; }
-      catch(e){ await fallbackToLocal(); }
-      if(t){ gameToken = t; ranks = { N, K:3000/N, remote:true }; }
-      else { secret = pickSecret(lo, hi); ranks = buildRanks(secret); }
-    } else {
-      secret = pickSecret(lo, hi);
-      ranks = buildRanks(secret);
-    }
-    persistCurrent();
-  }
   resultsOpen = false;
   hideResults();
   $("modeBadge").textContent = LANGS[LANG].badge + " " + rangeLabel(cfg.lo, cfg.hi);
   switchScreen("game");
-  renderAll();
-  $("guessInput").focus();
+  // entering the game may need a server round trip (new secret / missing ranks):
+  // show the board right away with a "preparing" note instead of freezing on the old screen
+  const needsServer = REMOTE && (!g || !!g.token);
+  if(needsServer){ result = {type:"preparing"}; renderAll(); }
+  let ready = true;
+  try{
+    if(g){
+      // resume a saved game (any language): board comes back as saved
+      if(g.token && REMOTE){
+        busy = true;
+        ranks = { N, K:3000/N, remote:true };
+        gameToken = g.token;
+        board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, distance:e.d }));
+        if(board.some(e => e.r == null || e.d == null)){
+          try{
+            const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
+            board = board.map((e, i) => {
+              const it = j.items && j.items[i];
+              return it ? { word:e.word, isHint:e.isHint, r:it.r, d:it.d, distance:it.d } : e;
+            }).filter(e => e.d != null);
+          }catch(err){ toast("存档恢复失败,请重试"); ready = false; }
+        }
+      } else if(g.secret){
+        if(REMOTE) await fallbackToLocal();     // a local-mode save needs the vector pack
+        secret = g.secret;
+        ranks = buildRanks(secret);
+        board = (g.board||[]).filter(e => IDX.has(e.word)).map(e => {
+          const r = ranks.rankOf.get(e.word);
+          return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], distance: ranks.distOf[r-1] };
+        });
+      } else {
+        toast("该存档无法继续,已移除");
+        store.games = store.games.filter(x => x.gid !== g.gid); save();
+        ready = false;
+      }
+      board.sort((a,b)=>a.distance-b.distance);
+    } else {
+      if(REMOTE){
+        // keep the UI responsive: the player can type while the secret is being created,
+        // the first guess/hint awaits pendingNew (see ensureToken)
+        pendingNew = apiPost("/new", { lang: LANG, lo, hi, recent: store.recent.slice(-160) })
+          .then(j => {
+            gameToken = j.t; ranks = { N, K:3000/N, remote:true };
+            if(result && result.type === "preparing"){ result = null; renderAll(); }
+            persistCurrent();
+            return j.t;
+          })
+          .catch(async () => {
+            pendingNew = null;
+            await fallbackToLocal();
+            secret = pickSecret(lo, hi); ranks = buildRanks(secret);
+            if(result && result.type === "preparing"){ result = null; renderAll(); }
+            persistCurrent();
+            return null;
+          });
+      } else {
+        secret = pickSecret(lo, hi);
+        ranks = buildRanks(secret);
+        persistCurrent();
+      }
+    }
+  } finally {
+    busy = false;
+  }
+  if(ready){ renderAll(); $("guessInput").focus(); }
+  else switchScreen("home"), refreshHome();
+  warmLang();   // keep the isolate warm for the first guess
+}
+// wait for the in-flight /api/new of the current game (player may have typed early)
+async function ensureToken(){
+  if(gameToken || !pendingNew) return !!gameToken;
+  try{ await pendingNew; }catch(e){}
+  return !!gameToken;
 }
 // online engine unreachable (offline / server error): degrade to the local vector engine
 async function fallbackToLocal(){
@@ -1230,18 +1302,29 @@ $("newWordBtn").onclick = async ()=>{
   sfx.click();
   hideResults();
   cfg.gid = newGid();
-  secret = undefined; gameToken = null;
+  secret = undefined; gameToken = null; pendingNew = null;
+  board = []; state = "ongoing"; result = null; marker = null;
   if(REMOTE){
-    let t = null;
-    try{ t = (await apiPost("/new", { lang: LANG, lo: cfg.lo, hi: cfg.hi, recent: store.recent.slice(-160) })).t; }catch(e){}
-    if(t){ gameToken = t; ranks = { N, K:3000/N, remote:true }; }
-    else { secret = pickSecret(cfg.lo, cfg.hi); ranks = buildRanks(secret); }
+    result = {type:"preparing"};
+    pendingNew = apiPost("/new", { lang: LANG, lo: cfg.lo, hi: cfg.hi, recent: store.recent.slice(-160) })
+      .then(j => {
+        gameToken = j.t; ranks = { N, K:3000/N, remote:true };
+        if(result && result.type === "preparing"){ result = null; renderAll(); }
+        persistCurrent();
+        return j.t;
+      })
+      .catch(async () => {
+        pendingNew = null;
+        secret = pickSecret(cfg.lo, cfg.hi); ranks = buildRanks(secret);
+        if(result && result.type === "preparing"){ result = null; renderAll(); }
+        persistCurrent();
+        return null;
+      });
   } else {
     secret = pickSecret(cfg.lo, cfg.hi);
     ranks = buildRanks(secret);
+    persistCurrent();
   }
-  board = []; state = "ongoing"; result = null; marker = null;
-  persistCurrent();
   renderAll();
   $("guessInput").focus();
 };
@@ -1315,6 +1398,7 @@ async function selectLang(lang){
   try{ refreshLvCards(); }catch(e){}
   renderLangRow();
   refreshHome();
+  warmLang(lang);   // preload the newly selected language on the server
 }
 
 /* ---------- boot ---------- */
@@ -1340,3 +1424,4 @@ window.__gw = {
   distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
   info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)})
 };
+warmLang();   // first game click should not wait for a cold isolate

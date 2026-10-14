@@ -44,11 +44,10 @@ function unb64u(s) {
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
 }
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-  });
+function json(body, status = 200, t0) {
+  const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+  if (t0) headers["server-timing"] = `total;dur=${Date.now() - t0}`;
+  return new Response(JSON.stringify(body), { status, headers });
 }
 async function gunzip(bytes) {
   const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
@@ -87,10 +86,11 @@ function distTable(N) {
   return out;
 }
 
-const STATE = { langs: new Map(), buckets: new Map() };  // per-isolate caches
+const STATE = { langs: new Map(), metas: new Map(), buckets: new Map() };  // per-isolate caches
 
 export function createEngine(fetchAsset) {
   const langs = STATE.langs;         // lang -> state (LRU, byte-budgeted)
+  const metas = STATE.metas;         // lang -> words + levels only (cheap, for /api/new)
   const dictBuckets = STATE.buckets; // "lang:bucket" -> parsed bucket object (LRU)
 
   function evict() {
@@ -101,30 +101,48 @@ export function createEngine(fetchAsset) {
       total -= langs.get(k).UNIT.byteLength;
       langs.delete(k);
     }
+    while (metas.size > 3) metas.delete(metas.keys().next().value);
     while (dictBuckets.size > 24) dictBuckets.delete(dictBuckets.keys().next().value);
+  }
+
+  // word list + levels only (~200KB): enough to pick a secret for /api/new
+  async function loadMeta(L) {
+    if (metas.has(L)) { const v = metas.get(L); metas.delete(L); metas.set(L, v); return v; }
+    const meta = JSON.parse(td.decode(await fetchAsset(`/data/gw-${L}-meta.json?v=${VER}`)));
+    const words = meta.words.split("|");
+    const lv = new Uint8Array(meta.level.length);
+    for (let i = 0; i < lv.length; i++) lv[i] = +meta.level[i];
+    const st = { L, N: meta.N, D: meta.D, WORDS: words, LVIDX: lv, chunks: meta.chunks, min: meta.min, max: meta.max };
+    metas.set(L, st);
+    evict();
+    return st;
   }
 
   async function loadLang(L) {
     if (langs.has(L)) { const v = langs.get(L); langs.delete(L); langs.set(L, v); return v; }
-    const meta = JSON.parse(td.decode(await fetchAsset(`/data/gw-${L}-meta.json?v=${VER}`)));
-    const parts = await Promise.all(Array.from({ length: meta.chunks }, (_, i) => fetchAsset(`/data/gw-${L}-vec-${i}.bin?v=${VER}`)));
-    let total = 0;
-    for (const p of parts) total += p.byteLength;
-    if (total !== meta.N * meta.D || total > CHUNK_LIMIT) throw new Error(`bad vec size for ${L}`);
-    const vec = new Uint8Array(total);
-    { let off = 0; for (const p of parts) { vec.set(p, off); off += p.byteLength; } }
-    const words = meta.words.split("|");
-    const lv = new Uint8Array(meta.level.length);
-    for (let i = 0; i < lv.length; i++) lv[i] = +meta.level[i];
-    const st = {
-      L, N: meta.N, D: meta.D, WORDS: words, LVIDX: lv,
-      UNIT: decodeUnit(meta.N, meta.D, vec, meta.min, meta.max),
-      DIST: distTable(meta.N),
-      IDX: new Map(words.map((w, i) => [w, i])),
-    };
-    langs.set(L, st);
-    evict();
-    return st;
+    // a warm request and the first guess can land together: share one load
+    if (!STATE.pending) STATE.pending = new Map();
+    if (STATE.pending.has(L)) return STATE.pending.get(L);
+    const job = (async () => {
+      const M = await loadMeta(L);
+      const parts = await Promise.all(Array.from({ length: M.chunks }, (_, i) => fetchAsset(`/data/gw-${L}-vec-${i}.bin?v=${VER}`)));
+      let total = 0;
+      for (const p of parts) total += p.byteLength;
+      if (total !== M.N * M.D || total > CHUNK_LIMIT) throw new Error(`bad vec size for ${L}`);
+      const vec = new Uint8Array(total);
+      { let off = 0; for (const p of parts) { vec.set(p, off); off += p.byteLength; } }
+      const st = {
+        L, N: M.N, D: M.D, WORDS: M.WORDS, LVIDX: M.LVIDX,
+        UNIT: decodeUnit(M.N, M.D, vec, M.min, M.max),
+        DIST: distTable(M.N),
+        IDX: new Map(M.WORDS.map((w, i) => [w, i])),
+      };
+      langs.set(L, st);
+      evict();
+      return st;
+    })();
+    STATE.pending.set(L, job);
+    try { return await job; } finally { STATE.pending.delete(L); }
   }
 
   // score pass: same math & tie-break jitter as the client (identical results,
@@ -190,7 +208,7 @@ export function createEngine(fetchAsset) {
     return bucket[word] || null;
   }
 
-  return { loadLang, scorePass, rankAt, indexAtRank, dictEntry, langs };
+  return { loadMeta, loadLang, scorePass, rankAt, indexAtRank, dictEntry, langs, metas };
 }
 
 function fnv1a(s) {
@@ -244,37 +262,49 @@ export async function handle(context, kind) {
   const { request, env } = context;
   const key = (env && env.GW_KEY) || DEFAULT_KEY;
   const eng = createEngine((p) => fetchAssetVia(env, request, p));
+  const t0 = Date.now();
+  const J = (b, s = 200) => json(b, s, t0);   // adds a server-timing header
 
   try {
     if (kind === "new") {
-      if (request.method !== "POST") return json({ err: "method" }, 405);
+      if (request.method !== "POST") return J({ err: "method" }, 405);
       const b = await body(request);
-      if (!b || !LANGS.includes(b.lang)) return json({ err: "bad request" }, 400);
+      if (!b || !LANGS.includes(b.lang)) return J({ err: "bad request" }, 400);
       const lo = Math.max(0, Math.min(LV_COUNT[b.lang] - 1, b.lo | 0));
       const hi = Math.max(lo, Math.min(LV_COUNT[b.lang] - 1, b.hi | 0));
-      const P = await eng.loadLang(b.lang);
+      const M = await eng.loadMeta(b.lang);   // word list only: picking a secret needs no vectors
       const pool = [];
-      for (let i = 0; i < P.N; i++) if (P.LVIDX[i] >= lo && P.LVIDX[i] <= hi) pool.push(i);
-      if (!pool.length) return json({ err: "empty pool" }, 400);
+      for (let i = 0; i < M.N; i++) if (M.LVIDX[i] >= lo && M.LVIDX[i] <= hi) pool.push(i);
+      if (!pool.length) return J({ err: "empty pool" }, 400);
       const recent = new Set(Array.isArray(b.recent) ? b.recent.slice(-160).filter((w) => typeof w === "string") : []);
-      const fresh = pool.filter((i) => !recent.has(P.WORDS[i]));
+      const fresh = pool.filter((i) => !recent.has(M.WORDS[i]));
       const use = fresh.length > 30 ? fresh : pool;
       const si = use[Math.floor(Math.random() * use.length)];
-      const t = await makeToken(key, { l: b.lang, lo, hi, s: P.WORDS[si], i: Date.now() });
-      if (!t) return json({ err: "token" }, 500);
-      return json({ t, pool: pool.length });
+      const t = await makeToken(key, { l: b.lang, lo, hi, s: M.WORDS[si], i: Date.now() });
+      if (!t) return J({ err: "token" }, 500);
+      return J({ t, pool: pool.length });
+    }
+
+    if (kind === "warm") {
+      // preload a language into this isolate (vectors + index) so the first
+      // /api/guess of a game does not pay the decode cost on the critical path
+      if (request.method !== "POST") return J({ err: "method" }, 405);
+      const b = await body(request);
+      if (!b || !LANGS.includes(b.lang)) return J({ err: "bad request" }, 400);
+      const P = await eng.loadLang(b.lang);
+      return J({ ok: true, n: P.N, vectors: true });
     }
 
     if (kind === "guess") {
-      if (request.method !== "POST") return json({ err: "method" }, 405);
+      if (request.method !== "POST") return J({ err: "method" }, 405);
       const b = await body(request);
       const p = b && await readToken(key, b.t);
-      if (!p) return json({ err: "bad token" }, 400);
+      if (!p) return J({ err: "bad token" }, 400);
       const words = Array.isArray(b.words) ? b.words.slice(0, 50).filter((w) => typeof w === "string") : [];
-      if (!words.length) return json({ err: "no words" }, 400);
+      if (!words.length) return J({ err: "no words" }, 400);
       const P = await eng.loadLang(p.l);
       const si = P.IDX.get(p.s);
-      if (si === undefined) return json({ err: "secret gone" }, 500);
+      if (si === undefined) return J({ err: "secret gone" }, 500);
       const scores = eng.scorePass(P, si, p.s);
       const items = words.map((w) => {
         const wi = P.IDX.get(w);
@@ -282,37 +312,37 @@ export async function handle(context, kind) {
         const r = wi === si ? 1 : eng.rankAt(P, scores, wi);
         return { r, d: P.DIST[r - 1] };
       });
-      return json({ items });
+      return J({ items });
     }
 
     if (kind === "hint") {
-      if (request.method !== "POST") return json({ err: "method" }, 405);
+      if (request.method !== "POST") return J({ err: "method" }, 405);
       const b = await body(request);
       const p = b && await readToken(key, b.t);
-      if (!p) return json({ err: "bad token" }, 400);
+      if (!p) return J({ err: "bad token" }, 400);
       const P = await eng.loadLang(p.l);
       const si = P.IDX.get(p.s);
-      if (si === undefined) return json({ err: "secret gone" }, 500);
+      if (si === undefined) return J({ err: "secret gone" }, 500);
       let r = b.r | 0;
-      if (!(r >= 1 && r <= P.N)) return json({ err: "bad rank" }, 400);
+      if (!(r >= 1 && r <= P.N)) return J({ err: "bad rank" }, 400);
       const scores = eng.scorePass(P, si, p.s);
       const wi = r === 1 ? si : eng.indexAtRank(P, scores, r);
       const rr = wi === si ? 1 : eng.rankAt(P, scores, wi);
-      return json({ word: P.WORDS[wi], r: rr, d: P.DIST[rr - 1] });
+      return J({ word: P.WORDS[wi], r: rr, d: P.DIST[rr - 1] });
     }
 
     if (kind === "def") {
       const u = new URL(request.url);
       const lang = u.searchParams.get("lang") || "";
       const word = (u.searchParams.get("word") || "").toLowerCase();
-      if (!LANGS.includes(lang) || !word || word.length > 60) return json({ err: "bad request" }, 400);
+      if (!LANGS.includes(lang) || !word || word.length > 60) return J({ err: "bad request" }, 400);
       const entry = await eng.dictEntry(lang, word);
-      return json({ entry });
+      return J({ entry });
     }
 
-    return json({ err: "not found" }, 404);
+    return J({ err: "not found" }, 404);
   } catch (e) {
-    return json({ err: "engine error", msg: String((e && e.message) || e) }, 500);
+    return J({ err: "engine error", msg: String((e && e.message) || e) }, 500);
   }
 }
 
