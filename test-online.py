@@ -52,8 +52,11 @@ with sync_playwright() as p:
     pg.goto(URL, wait_until="domcontentloaded")
     pg.wait_for_function("document.getElementById('dictCount') && document.getElementById('dictCount').textContent !== '…'", timeout=60000)
     result["boot_sec"] = round(time.time() - t0, 2)
+    pg.wait_for_function("document.documentElement.getAttribute('data-gw-remote') !== null", timeout=15000)
     result["remote_mode"] = pg.evaluate("document.documentElement.getAttribute('data-gw-remote')") == "1"
     result["vec_downloads_at_boot"] = [r for r in REQS if "-vec-" in r]
+    pg.wait_for_timeout(400)
+    result["boot_warm_ping"] = any("/api/warm" in r for r in REQS)   # page load pre-warms the isolate
 
     # ---------- play an English game ----------
     pg.evaluate("document.getElementById('startBtn').click()")
@@ -100,6 +103,14 @@ with sync_playwright() as p:
     result["api_def_called"] = any("/api/def" in r for r in reqs_since(m))
     result["dict_en"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,220)")
     result["dict_en_has_content"] = pg.evaluate("document.querySelectorAll('#dlEntry .dlDef').length > 0")
+    # dictionary fallback: a word our dictionary does not hold gets an external lookup link
+    pg.evaluate("document.getElementById('dlSearch').value='zzzzzz'; document.getElementById('dlGo').click()")
+    pg.wait_for_function("!!document.querySelector('#dlEntry .dlExt')", timeout=20000)
+    result["dict_fallback"] = pg.evaluate("""(() => {
+        const a = document.querySelector('#dlEntry .dlExt');
+        return {text: document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,100),
+                href: a.href, target: a.target};
+    })()""")
     pg.evaluate("document.getElementById('dlClose').click()")
     pg.wait_for_timeout(250)
 
@@ -164,6 +175,22 @@ with sync_playwright() as p:
         firstTip: (document.querySelector('#rankChart title')||{textContent:''}).textContent,
         cap: document.getElementById('chartCap').textContent
     }))()""")
+    # dictionary failure fallback: /api/def down -> retry button, then it recovers
+    errs_mark = len(errs)
+    pg.route("**/api/def*", lambda route: route.abort())
+    pg.evaluate("document.getElementById('resWord').click()")
+    pg.wait_for_function("!!document.querySelector('#dlEntry .dlRetry')", timeout=30000)
+    result["dict_retry_shown"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,100)")
+    pg.unroute("**/api/def*")
+    pg.evaluate("document.querySelector('#dlEntry .dlRetry').click()")
+    pg.wait_for_function("""(() => {
+        const t = document.getElementById('dlEntry').innerText;
+        return !document.querySelector('#dlEntry .dlRetry') && t.indexOf('加载失败') < 0 && t.indexOf('加载中') < 0;
+    })()""", timeout=30000)
+    result["dict_retry_ok"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,100)")
+    del errs[errs_mark:]   # the deliberate /api/def abort noise
+    pg.evaluate("document.getElementById('dlClose').click()")
+    pg.wait_for_timeout(250)
     pg.evaluate("document.getElementById('histHomeBtn').click()")
     pg.wait_for_timeout(400)
     result["hist_after_win"] = pg.evaluate("""(() => ({
@@ -179,11 +206,13 @@ with sync_playwright() as p:
     t1 = time.time()
     pg.evaluate("document.querySelector('.langBtn[data-lang=\"ja\"]').click()")
     pg.wait_for_function("() => { const b=document.querySelector('.langBtn[data-lang=\"ja\"]'); return b && b.classList.contains('on'); }", timeout=30000)
+    pg.wait_for_timeout(400)   # the switch-side warm fires right after the UI flips
     result["lang_switch_sec"] = round(time.time() - t1, 2)
     switched = reqs_since(m)
     result["lang_switch_vec_downloads"] = [r for r in switched if "-vec-" in r]
     result["lang_switch_meta"] = [r for r in switched if "meta.json" in r]
     result["lang_switch_dict_chunks"] = [r for r in switched if "gwdict" in r]
+    result["lang_switch_warm"] = any("/api/warm" in r for r in switched)   # switching pre-warms that language
 
     # play a Japanese game and verify the server engine handles it
     pg.evaluate("document.getElementById('startBtn').click()")
@@ -314,6 +343,7 @@ with sync_playwright() as p:
     # ---------- fallback: /api unreachable -> local vector engine ----------
     ctx2 = b.new_context()
     pg2 = ctx2.new_page()
+    pg2.add_init_script(INIT)   # record the page-reported remote flag for the fallback check
     reqs2 = []
     errs2 = []
     pg2.on("pageerror", lambda e: errs2.append("pageerror: " + str(e)))

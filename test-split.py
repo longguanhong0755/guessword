@@ -10,9 +10,15 @@ result, errs = {}, []
 INIT = """
 setInterval(function(){
   try{
-    var a = window.__gw && window.__gw.answer;
-    if (a && document.documentElement.getAttribute('data-gw-answer') !== a)
-      document.documentElement.setAttribute('data-gw-answer', a);
+    var g = window.__gw; if(!g) return;
+    var d = document.documentElement;
+    var a = g.answer;
+    if (a && d.getAttribute('data-gw-answer') !== a)
+      d.setAttribute('data-gw-answer', a);
+    if (!d.getAttribute('data-gw-words') && g.sampleWords){
+      var s = g.sampleWords(120);
+      if (s && s.length) d.setAttribute('data-gw-words', JSON.stringify(s));
+    }
   }catch(e){}
 }, 150);
 """
@@ -115,6 +121,14 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1500)
     result["dict_ko"] = pg.evaluate("document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,240)")
 
+    # ---- dictionary fallback: unknown word -> external link (NAVER for Korean) ----
+    pg.evaluate("document.getElementById('dlSearch').value='zzzzzz'; document.getElementById('dlGo').click()")
+    pg.wait_for_function("!!document.querySelector('#dlEntry .dlExt')", timeout=20000)
+    result["dict_fallback"] = pg.evaluate("""(() => {
+        const a = document.querySelector('#dlEntry .dlExt');
+        return {text: document.getElementById('dlEntry').innerText.replace(/\\n+/g,' | ').slice(0,80), href: a.href};
+    })()""")
+
 
     # ---- results screen: rank curve of this game's guesses (local engine) ----
     pg.evaluate("document.getElementById('dlClose').click()")
@@ -139,6 +153,56 @@ with sync_playwright() as p:
         boardRows: document.querySelectorAll('#board .row').length,
         firstTip: (document.querySelector('#rankChart title')||{textContent:''}).textContent
     }))()""")
+
+    # ---- long game (30+ guesses): the rank curve widens and scrolls instead of crowding ----
+    pg.evaluate("document.querySelector('.langBtn[data-lang=\"en\"]').click()")
+    pg.wait_for_timeout(700)
+    pg.evaluate("document.getElementById('startBtn').click()")
+    pg.wait_for_timeout(300)
+    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.wait_for_timeout(150)
+    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.wait_for_timeout(150)
+    pg.evaluate("document.getElementById('beginBtn').click()")
+    pg.wait_for_timeout(900)
+    pairs = json.loads(pg.evaluate("document.documentElement.getAttribute('data-gw-words') || '[]'"))
+    STOP = set("the a an and or but is are was were be been being have has had do does did will would could should may might must can i you he she it we they".split())
+    BAD = ("rape", "rapes", "retard", "retards", "nigga", "niggas", "nigger", "niggers",
+           "faggot", "faggots", "negro", "coon", "kike", "spastic")
+    cand = [w for w, lv in pairs
+            if lv >= 2 and len(w) >= 3 and w.isascii() and w.isalpha()
+            and w not in STOP and not w.startswith(BAD)]
+    ok = 0
+    for w in cand:
+        if ok >= 32:
+            break
+        pg.fill("#guessInput", w)
+        pg.press("#guessInput", "Enter")
+        try:
+            pg.wait_for_function("document.querySelectorAll('#board .row').length >= %d" % (ok + 1), timeout=8000)
+            ok += 1
+        except Exception:
+            pass   # folded duplicate or rejected word: skip it
+    result["long_game_guesses"] = ok
+    pg.evaluate("document.getElementById('menuBtn').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('giveupItem').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('confirmYes').click()")
+    pg.wait_for_function("document.getElementById('resultsView').style.display === 'block'", timeout=30000)
+    pg.wait_for_timeout(400)
+    result["dense_chart"] = pg.evaluate("""(() => {
+        const svg = document.querySelector('#rankChart svg');
+        const chart = document.getElementById('rankChart');
+        return {
+            hasSvg: !!svg,
+            points: document.querySelectorAll('#rankChart .rcDot, #rankChart .rcHint, #rankChart .rcWin').length,
+            boardRows: document.querySelectorAll('#board .row').length,
+            svgWidth: svg ? Math.round(svg.getBoundingClientRect().width) : 0,
+            scrollable: chart.scrollWidth > chart.clientWidth + 4,
+            xTicks: document.querySelectorAll('#rankChart .rcX').length
+        };
+    })()""")
 
     b.close()
 

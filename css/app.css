@@ -239,6 +239,8 @@
   .dlZh{margin:10px 0 8px; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--panel2); font-size:13.5px; line-height:1.7}
   .dlZhH{font-size:11px; font-weight:700; color:var(--muted); letter-spacing:.08em; margin-bottom:2px}
   .dlSrc{color:var(--muted); font-size:11.5px; padding:10px 0 14px; text-align:center}
+  .dlExtRow{display:flex; justify-content:center; gap:8px; flex-wrap:wrap; margin:-12px 0 16px}
+  a.dlExt{color:var(--fg); text-decoration:none}
   .rowWord[data-w]{cursor:pointer}
   .rowWord[data-w]:hover{text-decoration:underline; text-underline-offset:3px}
   .nbW[data-w]{cursor:pointer}
@@ -294,7 +296,7 @@
   .statCard{border:1px solid var(--border); border-radius:14px; background:var(--panel); padding:20px 22px; margin-top:14px}
   .statCard h3{margin:0 0 2px; font-size:15.5px; font-weight:800}
   .statSub{color:var(--muted); font-size:13px; margin-bottom:14px}
-  .rankChart{margin:2px 0 6px}
+  .rankChart{margin:2px 0 6px; overflow-x:auto; overflow-y:hidden}
   .rankSvg{width:100%; height:auto; display:block}
   .rcGrid{stroke:var(--border); stroke-width:1; stroke-dasharray:3 5}
   .rcTick{fill:var(--muted); font-size:15px; text-anchor:end; font-family:inherit}

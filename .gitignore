@@ -1,5 +1,6 @@
 site/
 deploy.local.env
+.wrangler/
 build/*.f32
 build/*.bak.html
 build/kaikki-sub.json

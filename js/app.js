@@ -53,6 +53,9 @@ function warmLang(lang){
   WARMED[lang] = Date.now();
   try{ apiPost("/warm", { lang }).catch(()=>{}); }catch(e){}
 }
+// an idle tab can outlive the edge isolate — re-warm whenever the player comes back to it
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) warmLang(); });
+window.addEventListener("focus", ()=> warmLang());
 const PACK_SRC = { en:()=>GWD, ja:()=>GW_JA, ko:()=>GW_KO, fr:()=>GW_FR, de:()=>GW_DE, es:()=>GW_ES };
 const PACK_MAP = { en:()=>GWMAP };
 const DICT_SRC = { en:()=>GWDICT_B64, ja:()=>GWDICT_JA_B64, ko:()=>GWDICT_KO_B64, fr:()=>GWDICT_FR_B64, de:()=>GWDICT_DE_B64, es:()=>GWDICT_ES_B64 };
@@ -549,6 +552,7 @@ function historyStats(){
   return {played, wins, avg: wins? (sum/wins):0};
 }
 // 本局每次猜测的名次曲线（横轴=第几猜，纵轴=该词在词库中的绝对名次，对数刻度，1 在顶部）
+// 猜测很多时画布横向撑开、外层可左右滑动，圆点和刻度不会被挤在一起
 function rankCurveSVG(){
   const pts = board
     .map(e => ({ w:e.word, n:e.n||0, r:(e.r!=null ? e.r : null), hint:!!e.isHint }))
@@ -558,8 +562,13 @@ function rankCurveSVG(){
   let last = 0;
   for(const p of pts){ if(!p.n) p.n = last + 1; last = p.n; }   // 老存档没有次序时按现有顺序补
   const NMAX = Math.max(2, N);
-  const W = 520, H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
-  const xs = n => pts.length <= 1 ? (PL + W - PR) / 2 : PL + (n-1)/(pts[pts.length-1].n - 1) * (W - PL - PR);
+  const H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
+  const endN = pts[pts.length-1].n;
+  const span = Math.max(1, endN - 1);
+  const dense = pts.length > 28;                       // 长对局：加宽 + 滚动 + 缩小热区
+  const W = dense ? Math.max(520, PL + PR + span*22) : 520;
+  const hitR = dense ? 11 : 15;
+  const xs = n => pts.length <= 1 ? (PL + W - PR) / 2 : PL + (n-1)/span * (W - PL - PR);
   const ys = r => PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (H - PT - PB);
   const ticks = [1, 10, 100, 1000].filter(t => t < NMAX).concat([NMAX]);
   const grid = ticks.map(t =>
@@ -568,7 +577,7 @@ function rankCurveSVG(){
   const line = pts.length > 1
     ? `<polyline class="rcLine" points="${pts.map(p => xs(p.n).toFixed(1)+","+ys(p.r).toFixed(1)).join(" ")}"/>` : "";
   const hits = pts.map(p =>
-    `<circle class="rcHit" cx="${xs(p.n).toFixed(1)}" cy="${ys(p.r).toFixed(1)}" r="15" data-w="${escHtml(p.w)}"/>`).join("");
+    `<circle class="rcHit" cx="${xs(p.n).toFixed(1)}" cy="${ys(p.r).toFixed(1)}" r="${hitR}" data-w="${escHtml(p.w)}"/>`).join("");
   const dots = pts.map(p => {
     const x = xs(p.n).toFixed(1), y = ys(p.r).toFixed(1);
     const tip = `<title>第 ${p.n} 猜${p.hint?"(提示)":""}:${escHtml(cap(p.w))} · 第 ${fmt(p.r)} 名</title>`;
@@ -576,10 +585,16 @@ function rankCurveSVG(){
     if(p.hint)    return `<rect class="rcHint" x="${(x-5.2).toFixed(1)}" y="${(y-5.2).toFixed(1)}" width="10.4" height="10.4" transform="rotate(45 ${x} ${y})" data-w="${escHtml(p.w)}">${tip}</rect>`;
     return `<circle class="rcDot" cx="${x}" cy="${y}" r="4.6" data-w="${escHtml(p.w)}">${tip}</circle>`;
   }).join("");
-  const endN = pts[pts.length-1].n;
-  const xlab = `<text class="rcTick rcX" x="${PL}" y="${H-4}">第1猜</text>`
-    + (endN > 1 ? `<text class="rcTick rcX" x="${W-PR-10}" y="${H-4}">第${endN}猜</text>` : "");
-  return `<svg class="rankSvg" viewBox="0 0 ${W} ${H}" role="img" aria-label="本局每次猜测的名次曲线">${grid}${line}${hits}${dots}${xlab}</svg>`;
+  let xlab = `<text class="rcTick rcX" x="${PL}" y="${H-4}">第1猜</text>`;
+  if(endN > 1){
+    xlab += `<text class="rcTick" x="${W-PR}" y="${H-4}">第${endN}猜</text>`;
+    if(dense){                       // 长对局：补齐中间刻度，滑动时便于定位
+      const step = Math.max(1, Math.ceil(span/8));
+      for(let n = 1 + step; n <= endN - step*0.5; n += step)
+        xlab += `<text class="rcTick rcX" x="${xs(n).toFixed(1)}" y="${H-4}">${n}</text>`;
+    }
+  }
+  return `<svg class="rankSvg"${dense ? ` style="width:${W}px"` : ""} viewBox="0 0 ${W} ${H}" role="img" aria-label="本局每次猜测的名次曲线">${grid}${line}${hits}${dots}${xlab}</svg>`;
 }
 function renderStats(){
   const h = historyStats();
@@ -587,8 +602,9 @@ function renderStats(){
     : (h.wins ? `已完成 ${h.played} 局 · 胜率 ${Math.round(h.wins/h.played*100)}% · 平均 ${h.avg.toFixed(1)} 次猜中`
               : `已完成 ${h.played} 局 · 快来赢下第一局!`);
   const svg = rankCurveSVG();
+  const dense = board.filter(e => e.r != null && e.r >= 1).length > 28;
   $("rankChart").innerHTML = svg || '<div class="rcEmpty">本局还没有可绘制的猜测记录。</div>';
-  $("chartCap").textContent = svg ? "本局每次猜测的名次(纵轴:1 = 答案,越靠上越接近,对数刻度) · 橙色菱形为提示 · 点圆点查词典" : "";
+  $("chartCap").textContent = svg ? "本局每次猜测的名次(纵轴:1 = 答案,越靠上越接近,对数刻度) · 橙色菱形为提示 · 点圆点查词典" + (dense ? " · 猜得多了,可左右滑动" : "") : "";
 }
 function renderHomeStats(){
   const h = historyStats();
@@ -767,6 +783,21 @@ const POS_ZH = {noun:"名词",verb:"动词",adj:"形容词",adv:"副词",pron:"�
 const DICT_CACHE = {};
 const DICT_ONE = new Map();   // online mode: "lang|word" -> entry | null (miss) | 0 (error, not cached)
 const DICT_ERR = 0;
+// 词典兜底：词库未收录(或释义为空)时，给一个该语言的外部词典入口
+const DICT_SITES = {
+  en:{ n:"剑桥英语词典", u:w => "https://dictionary.cambridge.org/dictionary/english/" + encodeURIComponent(w) },
+  ja:{ n:"Jisho 日语词典", u:w => "https://jisho.org/search/" + encodeURIComponent(w) },
+  ko:{ n:"NAVER 韩语词典", u:w => "https://ko.dict.naver.com/#/search?query=" + encodeURIComponent(w) },
+  fr:{ n:"Larousse 法语词典", u:w => "https://www.larousse.fr/dictionnaires/francais/" + encodeURIComponent(w) },
+  de:{ n:"Duden 德语词典", u:w => "https://www.duden.de/suchen/dudenonline/" + encodeURIComponent(w) },
+  es:{ n:"RAE 西语词典", u:w => "https://dle.rae.es/" + encodeURIComponent(w) },
+};
+function dictExtRow(word, retryQ){
+  const site = DICT_SITES[dictLang] || DICT_SITES.en;
+  return `<div class="dlExtRow">`
+    + (retryQ != null ? `<button type="button" class="lbtn dlRetry" data-q="${escHtml(retryQ)}">重试</button>` : "")
+    + `<a class="lbtn dlExt" href="${site.u(word)}" target="_blank" rel="noopener">在${escHtml(site.n)}中查询 ↗</a></div>`;
+}
 async function dictLookupOne(lang, word){
   const key = lang + "|" + word;
   if(DICT_ONE.has(key)) return DICT_ONE.get(key);
@@ -814,7 +845,7 @@ async function renderDict(q){
       if(!c) continue;
       const ent = await dictLookupOne(dl, c);
       if(ent === DICT_ERR){
-        if(seq === dlSeq && $("dlOverlay").classList.contains("open")) box.innerHTML = '<div class="dlEmpty">词典加载失败,请重试。</div>';
+        if(seq === dlSeq && $("dlOverlay").classList.contains("open")) box.innerHTML = '<div class="dlEmpty">词典加载失败,请检查网络。</div>' + dictExtRow(q, q);
         return;
       }
       if(ent){ key = c; e = ent; break; }
@@ -830,7 +861,7 @@ async function renderDict(q){
     const DD = DICT_CACHE[dl];
     for(const c of cands){ if(c && DD[c]){ key = c; e = DD[c]; break; } }
   }
-  if(!key){ box.innerHTML = `<div class="dlEmpty">词典未收录 “${escHtml(q)}”。</div>`; return; }
+  if(!key){ box.innerHTML = `<div class="dlEmpty">词典未收录 “${escHtml(q)}”。</div>` + dictExtRow(q); return; }
   const P = getPack(dl);
   const li = (P && P.IDX.has(key)) ? P.LVIDX[P.IDX.get(key)] : null;
   const lv = li!=null && li<=5 ? `<span class="dlLv">${escHtml(levelsOf(dl)[li])}</span>` : "";
@@ -853,8 +884,8 @@ async function renderDict(q){
     const src = e.src === "e" ? "英文释义来源:ECDICT" : "英文释义来源:Wiktionary (CC BY-SA)";
     box.innerHTML = head
       + (ipa.length ? `<div class="dlIpaRow">${ipa.join("")}</div>` : "")
-      + (posHtml || '<div class="dlEmpty">该词暂无释义数据。</div>') + zh
-      + `<div class="dlSrc">${src} · 中文:ECDICT</div>`;
+      + (posHtml ? posHtml + zh + `<div class="dlSrc">${src} · 中文:ECDICT</div>`
+                 : '<div class="dlEmpty">该词暂无释义数据。</div>' + dictExtRow(key));
     return;
   }
   // non-english entries: {rd?, zhw?, p:[{p, s:[{d, z?, ex}]}]}
@@ -872,11 +903,15 @@ async function renderDict(q){
     return `<div class="dlPosBlock"><div class="dlPos">${escHtml(POS_ZH[pb.p] || pb.p || "")}</div>${senses}</div>`;
   }).join("");
   box.innerHTML = head + rd + zhw
-    + (posHtml || '<div class="dlEmpty">该词暂无释义数据。</div>')
-    + `<div class="dlSrc">释义来源:Wiktionary (CC BY-SA)${hasZh ? " · 中文译文为离线机器翻译" : ""}</div>`;
+    + (posHtml ? posHtml + `<div class="dlSrc">释义来源:Wiktionary (CC BY-SA)${hasZh ? " · 中文译文为离线机器翻译" : ""}</div>`
+               : '<div class="dlEmpty">该词暂无释义数据。</div>' + dictExtRow(key));
 }
 function dlQuery(){ renderDict($("dlSearch").value.trim().toLowerCase()); }
 $("dlGo").onclick = dlQuery;
+$("dlEntry").addEventListener("click", e=>{
+  const b = e.target.closest(".dlRetry");
+  if(b && b.dataset.q != null) renderDict(b.dataset.q);
+});
 $("dlSearch").addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.isComposing && e.keyCode!==229){ e.preventDefault(); dlQuery(); } });
 $("dlClose").onclick = ()=>{ closeOv("dlOverlay"); refocusGameInput(); };
 $("dlHomeBtn").onclick = ()=> openDict("");
@@ -1442,6 +1477,7 @@ window.__gw = {
   remote: () => REMOTE,
   rankOf: w => ranks && ranks.rankOf ? ranks.rankOf.get(w) : undefined,
   distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
+  sampleWords: k => { const out = [], step = Math.max(1, Math.floor(N/k)); for(let i=0;i<N && out.length<k;i+=step) out.push([WORDS[i], LVIDX[i]]); return out; },
   info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)})
 };
 warmLang();   // first game click should not wait for a cold isolate
