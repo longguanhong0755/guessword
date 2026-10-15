@@ -28,6 +28,11 @@ setInterval(function(){
     if (t === null && d.getAttribute('data-gw-token') !== null) d.removeAttribute('data-gw-token');
     var rm = g.remote() ? "1" : "0";
     if (d.getAttribute('data-gw-remote') !== rm) d.setAttribute('data-gw-remote', rm);
+    if (!d.getAttribute('data-gw-daily') && g.daily){
+      var n = new Date(), p = function(v){ return ("0" + v).slice(-2); };
+      var dw = g.daily("en", n.getFullYear() + "-" + p(n.getMonth()+1) + "-" + p(n.getDate()));
+      if (dw) d.setAttribute('data-gw-daily', dw);
+    }
   }catch(e){}
 }, 150);
 """
@@ -175,6 +180,17 @@ with sync_playwright() as p:
         firstTip: (document.querySelector('#rankChart title')||{textContent:''}).textContent,
         cap: document.getElementById('chartCap').textContent
     }))()""")
+    # share card: the canvas-rendered PNG preview
+    pg.evaluate("document.getElementById('shareCardBtn').click()")
+    pg.wait_for_function("document.getElementById('shareOverlay').classList.contains('open')", timeout=15000)
+    pg.wait_for_function("(() => { const i = document.getElementById('shareImg'); return i && i.naturalWidth > 400; })()", timeout=20000)
+    result["share_card"] = pg.evaluate("""(() => {
+        const i = document.getElementById('shareImg');
+        return {w: i.naturalWidth, h: i.naturalHeight, src: i.src.slice(0, 22),
+                dl: document.getElementById('shareDl').getAttribute('download')};
+    })()""")
+    pg.evaluate("document.getElementById('shareClose').click()")
+    pg.wait_for_timeout(200)
     # dictionary failure fallback: /api/def down -> retry button, then it recovers
     errs_mark = len(errs)
     pg.route("**/api/def*", lambda route: route.abort())
@@ -198,8 +214,56 @@ with sync_playwright() as p:
       finished: document.querySelectorAll('.histItem:not(.histOng)').length,
       sub: document.getElementById('histSub').innerText
     }))()""")
+    result["hist_stats"] = pg.evaluate("document.getElementById('histStats').innerText.replace(/\\n+/g,' | ').slice(0,140)")
     pg.evaluate("document.getElementById('histClose').click()")
     pg.wait_for_timeout(250)
+
+    # ---------- daily challenge: one word per language per day, first run = official score ----------
+    today = time.strftime("%Y-%m-%d")
+
+    def api_hint1(tok):
+        return pg.evaluate("async (t) => { const r = await fetch('/api/hint', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({t, r:1})}); return (await r.json()).word; }", tok)
+
+    tok_prev = pg.evaluate("document.documentElement.getAttribute('data-gw-token')")
+    pg.evaluate("document.getElementById('dailyBtn').click()")
+    pg.wait_for_function("/每日挑战/.test(document.getElementById('modeBadge').textContent)", timeout=40000)
+    pg.wait_for_function("(t) => { const v = document.documentElement.getAttribute('data-gw-token'); return !!v && v !== t; }", arg=tok_prev, timeout=40000)
+    tok_d1 = pg.evaluate("document.documentElement.getAttribute('data-gw-token')")
+    d_secret1 = api_hint1(tok_d1)
+    pg.wait_for_function("document.documentElement.getAttribute('data-gw-daily') !== null", timeout=15000)
+    d_client = pg.evaluate("document.documentElement.getAttribute('data-gw-daily')")
+    d_fresh = pg.evaluate("""async (d) => {
+        const r1 = await fetch('/api/new', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({lang:'en', lo:0, hi:5, daily:d})});
+        const t1 = (await r1.json()).t;
+        const h = await fetch('/api/hint', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({t:t1, r:1})});
+        return (await h.json()).word;
+    }""", today)
+    result["daily"] = {"badge": pg.evaluate("document.getElementById('modeBadge').textContent"),
+                       "secret": d_secret1, "client": d_client, "fresh": d_fresh,
+                       "stable": d_secret1 == d_client == d_fresh}
+    # finish run 1 by winning -> becomes the official score of the day
+    pg.fill("#guessInput", d_secret1)
+    pg.press("#guessInput", "Enter")
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 1", timeout=40000)
+    pg.evaluate("document.getElementById('resWord').textContent = ''")
+    pg.wait_for_function("(document.getElementById('resWord')||{}).textContent.length > 0", timeout=40000)
+    pg.evaluate("document.getElementById('homeBtn').click()")
+    pg.wait_for_timeout(500)
+    result["daily_btn_done"] = pg.evaluate("document.getElementById('dailyBtn').innerText")
+    # run 2 = practice: same word again (fresh token), then give up
+    pg.evaluate("document.getElementById('dailyBtn').click()")
+    pg.wait_for_function("(t) => { const v = document.documentElement.getAttribute('data-gw-token'); return !!v && v !== t; }", arg=tok_d1, timeout=40000)
+    tok_d2 = pg.evaluate("document.documentElement.getAttribute('data-gw-token')")
+    result["daily_again"] = {"same_word": api_hint1(tok_d2) == d_secret1, "new_token": tok_d2 != tok_d1}
+    pg.evaluate("document.getElementById('menuBtn').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('giveupItem').click()")
+    pg.wait_for_timeout(250)
+    pg.evaluate("document.getElementById('confirmYes').click()")
+    pg.wait_for_function("document.getElementById('resultsView').style.display === 'block'", timeout=30000)
+    pg.evaluate("document.getElementById('homeBtn').click()")
+    pg.wait_for_timeout(400)
+    result["daily_btn_after_practice"] = pg.evaluate("document.getElementById('dailyBtn').innerText")
 
     # ---------- language switch: no vector chunks, only meta ----------
     m = len(REQS)

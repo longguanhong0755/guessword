@@ -71,6 +71,12 @@
   }
   .resume.show{display:inline-flex}
   .resume:hover{border-color:var(--border2)}
+  .dailyBtn{
+    display:inline-flex; align-items:center; gap:8px; padding:11px 30px; border-radius:12px;
+    border:1px solid var(--accent); color:var(--accent); background:transparent;
+    font-size:15px; font-weight:700; transition:background .15s;
+  }
+  .dailyBtn:hover{background:var(--panel2)}
   .homeStats{display:flex; justify-content:center; gap:8px; margin-top:26px; flex-wrap:wrap}
   /* ---------- SETUP ---------- */
   #setup{align-items:center; justify-content:center; padding:36px 18px}
@@ -291,11 +297,21 @@
   .resWord{font-size:38px; font-weight:800; letter-spacing:-.01em; margin:2px 0 4px; text-transform:uppercase; cursor:pointer}
   .resWord:hover{text-decoration:underline; text-underline-offset:6px; text-decoration-thickness:3px}
   .resWord.won{color:var(--green)} .resWord.lost{color:var(--red)}
+  .shareDlg{width:min(94vw,420px)}
+  .sharePrev{display:flex; justify-content:center; margin:2px 0 10px}
+  .sharePrev img{width:100%; max-width:340px; border-radius:12px; border:1px solid var(--border); display:block}
+  .shareTip{color:var(--muted); font-size:12px; text-align:center; margin:0 0 14px}
+  a.shareDl{color:var(--fg); text-decoration:none; display:inline-flex; align-items:center; justify-content:center}
   .resChips{display:flex; justify-content:center; gap:8px; flex-wrap:wrap; margin:14px 0 20px}
   .resBtns{display:flex; justify-content:center; gap:9px; flex-wrap:wrap}
   .statCard{border:1px solid var(--border); border-radius:14px; background:var(--panel); padding:20px 22px; margin-top:14px}
   .statCard h3{margin:0 0 2px; font-size:15.5px; font-weight:800}
   .statSub{color:var(--muted); font-size:13px; margin-bottom:14px}
+  .statStrip{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:0 0 12px}
+  .statStrip:empty{display:none}
+  .stCell{border:1px solid var(--border); border-radius:10px; padding:8px 4px; text-align:center; background:var(--panel2)}
+  .stV{font-weight:800; font-size:16.5px}
+  .stK{color:var(--muted); font-size:11px; margin-top:1px}
   .rankChart{margin:2px 0 6px; overflow-x:auto; overflow-y:hidden}
   .rankSvg{width:100%; height:auto; display:block}
   .rcGrid{stroke:var(--border); stroke-width:1; stroke-dasharray:3 5}

@@ -13,8 +13,8 @@ const LANGS = {
   en:{ name:"English",  cn:"英文", badge:"CEFR",  levels:["A1","A2","B1","B2","C1","C2"], chars:/^[a-z]+$/ },
   ja:{ name:"日本語",   cn:"日文", badge:"JLPT",  levels:["N5","N4","N3","N2","N1"], chars:/^[\u3040-\u30ff\u4e00-\u9fff\u3005\u30fc\uff66-\uff9fー]+$/ },
   ko:{ name:"한국어",   cn:"韩文", badge:"延世",  levels:["延世1","延世2","延世3","延世4","延世5","延世6"], chars:/^[\uac00-\ud7a3]+$/ },
-  fr:{ name:"Français", cn:"法文", badge:"词频",  levels:["频段1","频段2","频段3","频段4","频段5","频段6"], chars:/^[a-zàâäéèêëîïôöùûüÿçœæ]+$/ },
-  de:{ name:"Deutsch",  cn:"德文", badge:"词频",  levels:["频段1","频段2","频段3","频段4","频段5","频段6"], chars:/^[a-zäöüß]+$/ },
+  fr:{ name:"Français", cn:"法文", badge:"词频",  levels:["频段1","频段2","频段3","频段4","频段5","频段6"], chars:/^[a-zàâäéèêëîïôöùûüÿçœæ'’-]+$/ },
+  de:{ name:"Deutsch",  cn:"德文", badge:"词频",  levels:["频段1","频段2","频段3","频段4","频段5","频段6"], chars:/^[a-zäöüßéèêàçôîñ'’-]+$/ },
   es:{ name:"Español",  cn:"西班牙文", badge:"词频", levels:["频段1","频段2","频段3","频段4","频段5","频段6"], chars:/^[a-záéíóúüñ]+$/ },
 };
 function langCn(){ try{ return LANGS[LANG].cn || "英文"; }catch(e){ return "英文"; } }
@@ -126,10 +126,11 @@ function activateLang(lang){
 const $ = id => document.getElementById(id);
 const LSKEY = "guessword-v2";
 const MODEL_VER = "nb1908b";   // embedding model tag; history saved under an older tag gets distances recomputed
-let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[] };
+let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[], daily:{} };
 try{ const raw = localStorage.getItem(LSKEY); if(raw){ store = Object.assign(store, JSON.parse(raw)); } }catch(e){}
 if(!Array.isArray(store.notebook)) store.notebook = [];
 if(!Array.isArray(store.games)) store.games = [];
+if(!store.daily || typeof store.daily !== "object") store.daily = {};
 if(typeof store.settings.ac !== "boolean") store.settings.ac = true;
 if(!LANGS[store.settings.lang]) store.settings.lang = "en";
 function save(){ try{ localStorage.setItem(LSKEY, JSON.stringify(store)); }catch(e){} }
@@ -199,9 +200,14 @@ function buildRanks(secretWord, lang){
 }
 
 /* ---------- puzzle pools: selected level + the one below ---------- */
+// 谜底必须是玩家能打出来的词：英文的过常用词/屏蔽词在下注时会被拒绝，不能当谜底
+function secretOk(w, lang){
+  if((lang || LANG) === "en") return !STOP_EN.has(w) && !BLOCKED.some(b => w.startsWith(b));
+  return true;
+}
 function poolForRange(lo, hi){
   const out = [];
-  for(let i=0;i<N;i++) if(LVIDX[i]>=lo && LVIDX[i]<=hi) out.push(WORDS[i]);
+  for(let i=0;i<N;i++) if(LVIDX[i]>=lo && LVIDX[i]<=hi && secretOk(WORDS[i])) out.push(WORDS[i]);
   return out;
 }
 function poolFor(levelIdx){ return poolForRange(Math.max(0, levelIdx-1), levelIdx); }
@@ -211,6 +217,24 @@ function pickSecret(lo, hi){
   const fresh = pool.filter(w => !recent.has(w));
   const use = fresh.length > 30 ? fresh : pool;
   return use[Math.floor(Math.random()*use.length)];
+}
+/* ---------- daily challenge: 每语言按日期确定一个谜底（同一天全站同一个词，各语言不同） ---------- */
+const DAILY_KEY = "gw-daily-v1";
+function dailyStr(d){
+  d = d || new Date();
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth()+1) + "-" + p(d.getDate());
+}
+function dailyShort(date){ return date ? date.slice(5).replace("-", "/") : ""; }
+function dailyWordFor(date, lang){
+  lang = lang || LANG;
+  const P = getPack(lang);
+  if(!P) return null;
+  const maxLv = (LANGS[lang] ? LANGS[lang].levels.length : 6) - 1;
+  const pool = [];
+  for(let i=0;i<P.N;i++){ const l = P.LVIDX[i]; if(l >= 0 && l <= maxLv && secretOk(P.WORDS[i], lang)) pool.push(P.WORDS[i]); }
+  if(!pool.length) return null;
+  return pool[Math.floor(rng(DAILY_KEY + "|" + lang + "|" + date)() * pool.length)];
 }
 
 /* ---------- persistence of unfinished games (every unfinished game is kept) ---------- */
@@ -223,6 +247,7 @@ function persistCurrent(){
   const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
                 board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null), n:(e.n||null) })),
                 at: Date.now() };
+  if(cfg.daily) rec.daily = cfg.daily;
   if(REMOTE) rec.token = gameToken; else rec.secret = secret;
   const rest = store.games.filter(g => g.gid !== cfg.gid);
   rest.push(rec);                     // most recent activity goes last (home "continue" uses the last)
@@ -231,10 +256,19 @@ function persistCurrent(){
   save();
 }
 function finishToHistory(){
-  store.history.push({ lo:cfg.lo, hi:cfg.hi, secret, state, lang: cfg.lang || LANG, board:board.map(e=>({word:e.word,isHint:e.isHint,distance:e.distance})), at:Date.now(), mv:MODEL_VER });
+  store.history.push({ lo:cfg.lo, hi:cfg.hi, secret, state, lang: cfg.lang || LANG, daily: cfg.daily || undefined,
+                       board:board.map(e=>({word:e.word,isHint:!!e.isHint,distance:e.distance})), at:Date.now(), mv:MODEL_VER });
   while(store.history.length > 300) store.history.shift();
   if(secret){ store.recent.push(secret); while(store.recent.length > 200) store.recent.shift(); }
   if(cfg) store.games = store.games.filter(g => g.gid !== cfg.gid);
+  if(cfg && cfg.daily){
+    // 每日挑战：第一局的成绩作为当天正式成绩，之后重玩只计数（练习）
+    const d = store.daily[cfg.daily] || (store.daily[cfg.daily] = { plays: 0 });
+    d.plays++;
+    if(!d.first) d.first = { state, g: board.filter(e=>!e.isHint).length, h: board.filter(e=>e.isHint).length, at: Date.now() };
+    const ks = Object.keys(store.daily).sort();
+    while(ks.length > 90) delete store.daily[ks.shift()];
+  }
   save();
 }
 
@@ -553,14 +587,18 @@ function historyStats(){
 }
 // 本局每次猜测的名次曲线（横轴=第几猜，纵轴=该词在词库中的绝对名次，对数刻度，1 在顶部）
 // 猜测很多时画布横向撑开、外层可左右滑动，圆点和刻度不会被挤在一起
-function rankCurveSVG(){
+function curvePts(){
   const pts = board
     .map(e => ({ w:e.word, n:e.n||0, r:(e.r!=null ? e.r : null), hint:!!e.isHint }))
     .filter(p => p.r != null && p.r >= 1);
-  if(!pts.length) return "";
   pts.sort((a,b) => (a.n||0) - (b.n||0));
   let last = 0;
   for(const p of pts){ if(!p.n) p.n = last + 1; last = p.n; }   // 老存档没有次序时按现有顺序补
+  return pts;
+}
+function rankCurveSVG(){
+  const pts = curvePts();
+  if(!pts.length) return "";
   const NMAX = Math.max(2, N);
   const H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
   const endN = pts[pts.length-1].n;
@@ -961,7 +999,7 @@ function histRowHTML(g, opts){
     return `<div class="histItem histOng" data-gid="${escHtml(g.gid)}">
       <div class="histRow ongRow"><span class="histSt o">${IC.clock}</span>
       <div class="ongMain">
-        <div class="ongTop"><span class="histW">${escHtml(LANGS[gl].name)}</span><span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span></div>
+        <div class="ongTop"><span class="histW">${escHtml(LANGS[gl].name)}</span><span class="histR">${g.daily ? escHtml("每日挑战 " + dailyShort(g.daily)) : escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span></div>
         <div class="ongSub">已猜 ${gc} 次 · ${fmtWhen(g.at)}</div>
       </div>
       <button type="button" class="histCont" data-gid="${escHtml(g.gid)}">继续</button>
@@ -972,7 +1010,7 @@ function histRowHTML(g, opts){
   return `<div class="histItem" data-i="${opts.i}">
       <div class="histRow"><span class="histSt ${won?"w":"l"}">${won?IC.trophy:IC.x}</span>
       <span class="histW" data-w="${escHtml(g.secret)}" data-lang="${escHtml(gl)}">${escHtml(gl==="de" ? g.secret : cap(g.secret))}${gl!=="en"?`<i class="histLang">${escHtml(LANGS[gl].name)}</i>`:""}</span>
-      <span class="histR">${escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span>
+      <span class="histR">${g.daily ? escHtml("每日挑战 " + dailyShort(g.daily)) : escHtml(rangeLabelFor(g.lo,g.hi,gl))}</span>
       <span class="histMeta">${gc} 猜 · ${fmtWhen(g.at)}</span>
       <span class="histChev">${IC.chevR}</span></div>
       <div class="histDet"><div class="hRows">${histGameRows(g)}</div></div>
@@ -980,6 +1018,24 @@ function histRowHTML(g, opts){
 }
 function histSecHTML(label){
   return `<div class="histSec">${label}</div>`;
+}
+// 跨局战绩：从本地历史统计连胜/胜率/平均等
+function crossStats(){
+  const gs = store.history.filter(g => g.state === "won" || g.state === "lost");
+  let wins = 0, sum = 0, fastest = null, run = 0, best = 0;
+  for(const g of gs){
+    if(g.state === "won"){
+      wins++;
+      const n = (g.board||[]).filter(e => !e.isHint).length;
+      sum += n;
+      if(fastest === null || n < fastest) fastest = n;
+      run++; if(run > best) best = run;
+    } else run = 0;
+  }
+  let cur = 0;
+  for(let i = gs.length - 1; i >= 0; i--){ if(gs[i].state === "won") cur++; else break; }
+  return { played: gs.length, wins, rate: gs.length ? Math.round(wins/gs.length*100) : 0,
+           cur, best, avg: wins ? sum/wins : 0, fastest };
 }
 function renderHist(){
   const games = store.history, list = $("histList");
@@ -989,6 +1045,11 @@ function renderHist(){
   if(ong.length) parts.push(`${ong.length} 局未完成`);
   if(games.length) parts.push(`已完成 ${games.length} 局 · 胜 ${wins} · 胜率 ${Math.round(wins/games.length*100)}%`);
   $("histSub").textContent = parts.length ? parts.join(" · ") : "完成一局后会自动保存在这里。";
+  const cs = crossStats();
+  $("histStats").innerHTML = cs.played ? [
+    ["局数", cs.played], ["胜率", cs.rate + "%"], ["当前连胜", cs.cur],
+    ["最长连胜", cs.best], ["平均猜中", cs.wins ? cs.avg.toFixed(1) : "—"], ["最快猜中", cs.fastest != null ? cs.fastest : "—"],
+  ].map(([k, v]) => `<div class="stCell"><div class="stV">${v}</div><div class="stK">${k}</div></div>`).join("") : "";
   if(!games.length && !ong.length){ list.innerHTML = `<div class="nbEmpty">还没有记录。来玩一局,结束的棋局都会存档在此。</div>`; return; }
   list.innerHTML =
       (ong.length ? histSecHTML(`未完成的对局 · ${ong.length} · 点“继续”接着玩`) + ong.map(g => histRowHTML(g, {unfinished:true})).join("") : "")
@@ -1100,16 +1161,36 @@ function switchScreen(id){
 function refreshHome(){
   renderHomeStats();
   const c = latestGame();
-  const canResume = !!(c && c.board && c.board.length > 0);
+  const today = dailyStr();
+  const canResume = !!(c && c.board && c.board.length > 0) && !(c.daily === today);   // 今日挑战有专属按钮
   const b = $("resumeBtn");
   b.classList.toggle("show", canResume);
   if(canResume){
     const cl = (c.lang && LANGS[c.lang]) ? c.lang : "en";
     const gc = (c.board||[]).filter(e => !e.isHint).length;
-    b.innerHTML = `继续上局 · ${escHtml(LANGS[cl].badge)} ${escHtml(rangeLabelFor(c.lo, c.hi, cl))}${cl!=="en"?` · ${escHtml(LANGS[cl].name)}`:""} · 已猜 ${gc} 次`;
+    b.innerHTML = c.daily
+      ? `继续上局 · 每日挑战 ${escHtml(dailyShort(c.daily))} · 已猜 ${gc} 次`
+      : `继续上局 · ${escHtml(LANGS[cl].badge)} ${escHtml(rangeLabelFor(c.lo, c.hi, cl))}${cl!=="en"?` · ${escHtml(LANGS[cl].name)}`:""} · 已猜 ${gc} 次`;
     b.onclick = ()=>{ sfx.click(); resumeGame(c.gid); };
   }
+  const db = $("dailyBtn");
+  const rec = store.daily[today];
+  const ong = store.games.find(g => g.daily === today);
+  if(ong){
+    const gc = (ong.board||[]).filter(e => !e.isHint).length;
+    db.textContent = `继续每日挑战 · 已猜 ${gc} 次`;
+    db.onclick = ()=>{ sfx.click(); resumeGame(ong.gid); };
+  } else if(rec && rec.first){
+    db.textContent = rec.first.state === "won"
+      ? `每日挑战已完成 · ${rec.first.g} 次猜中 · 再来一练`
+      : "每日挑战已完成 · 再来一练";
+    db.onclick = ()=>{ sfx.click(); startDaily(today); };
+  } else {
+    db.textContent = `每日挑战 · ${dailyShort(today)}`;
+    db.onclick = ()=>{ sfx.click(); startDaily(today); };
+  }
 }
+function startDaily(date){ startGame(0, LEVELS.length - 1, null, date); }
 async function resumeGame(gid){
   const g = findGame(gid);
   if(!g) return;
@@ -1159,7 +1240,7 @@ function refreshLvCards(){
     `<button class="lvCard" data-i="${i}"><span class="nm">${m.en}</span><span class="ds">${m.zh}</span><span class="ct">${LV_COUNTS[i].toLocaleString("en-US")} 词</span></button>`).join("");
   const sn = $("srcNote"); if(sn) sn.textContent = srcNoteOf(LANG);
   $("dictCount").textContent = N.toLocaleString("en-US");
-  $("secretCount").textContent = LVIDX.filter(l=>l<=5).length.toLocaleString("en-US");
+  $("secretCount").textContent = LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length.toLocaleString("en-US");
   bindLvCards();
 }
 /* ---------- 难度选择:点击两点框区间 / 按住拖动框选(鼠标+触屏) / 悬停实时预览 ---------- */
@@ -1252,14 +1333,15 @@ $("beginBtn").onclick = ()=>{
 };
 
 /* ---------- game lifecycle ---------- */
-async function startGame(lo, hi, resumeGid){
+async function startGame(lo, hi, resumeGid, dailyDate){
   const g = (resumeGid != null) ? findGame(resumeGid) : null;
-  cfg = { lo: g ? g.lo : lo, hi: g ? g.hi : hi, lang: LANG, gid: g ? g.gid : newGid() };
+  const daily = dailyDate || (g && g.daily) || null;
+  cfg = { lo: g ? g.lo : lo, hi: g ? g.hi : hi, lang: LANG, gid: g ? g.gid : newGid(), daily };
   secret = undefined; gameToken = null; ranks = null;
   board = []; state = "ongoing"; result = null; marker = null;
   resultsOpen = false;
   hideResults();
-  $("modeBadge").textContent = LANGS[LANG].badge + " " + rangeLabel(cfg.lo, cfg.hi);
+  $("modeBadge").textContent = cfg.daily ? "每日挑战 " + dailyShort(cfg.daily) : (LANGS[LANG].badge + " " + rangeLabel(cfg.lo, cfg.hi));
   switchScreen("game");
   // entering the game may need a server round trip (new secret / missing ranks):
   // show the board right away with a "preparing" note instead of freezing on the old screen
@@ -1301,7 +1383,7 @@ async function startGame(lo, hi, resumeGid){
       if(REMOTE){
         // keep the UI responsive: the player can type while the secret is being created,
         // the first guess/hint awaits pendingNew (see ensureToken)
-        pendingNew = apiPost("/new", { lang: LANG, lo, hi, recent: store.recent.slice(-160) })
+        pendingNew = apiPost("/new", { lang: LANG, lo, hi, daily: cfg.daily || undefined, recent: store.recent.slice(-160) })
           .then(j => {
             gameToken = j.t; ranks = { N, K:3000/N, remote:true };
             if(result && result.type === "preparing"){ result = null; renderAll(); }
@@ -1311,13 +1393,13 @@ async function startGame(lo, hi, resumeGid){
           .catch(async () => {
             pendingNew = null;
             await fallbackToLocal();
-            secret = pickSecret(lo, hi); ranks = buildRanks(secret);
+            secret = (cfg.daily && dailyWordFor(cfg.daily)) || pickSecret(lo, hi); ranks = buildRanks(secret);
             if(result && result.type === "preparing"){ result = null; renderAll(); }
             persistCurrent();
             return null;
           });
       } else {
-        secret = pickSecret(lo, hi);
+        secret = (cfg.daily && dailyWordFor(cfg.daily)) || pickSecret(lo, hi);
         ranks = buildRanks(secret);
         persistCurrent();
       }
@@ -1355,6 +1437,7 @@ $("boardBtn").onclick = ()=>{ if(!cfg) return; hideResults(); };
 $("newWordBtn").onclick = async ()=>{
   if(!cfg) return;
   sfx.click();
+  if(cfg.daily){ startDaily(cfg.daily); return; }   // 每日挑战的“再来”= 同一道题再练一局
   hideResults();
   cfg.gid = newGid();
   secret = undefined; gameToken = null; pendingNew = null;
@@ -1387,6 +1470,121 @@ $("shareBtn").onclick = async ()=>{
   if(!cfg) return;
   (await copyText(shareText())) ? toast("已复制到剪贴板") : toast("复制失败");
 };
+
+/* ---------- share card: 把本局画成一张可直接发出去的图片 ---------- */
+function buildShareCard(){
+  const W = 760, H = 1000, S = 2;
+  const cv = document.createElement("canvas");
+  cv.width = W * S; cv.height = H * S;
+  const x = cv.getContext("2d");
+  x.scale(S, S);
+  const BG = "#101216", PANEL = "#15181e", CARD = "#12151b", BORDER = "#2b313b",
+        FG = "#e8eaee", MUTED = "#8a919e", ACC = "#3b82f6", GRN = "#43b956", ORG = "#e0912a", RED = "#d94848";
+  const font = (w, s) => w + " " + s + "px 'PingFang SC','Microsoft YaHei','Segoe UI',system-ui,sans-serif";
+  const rr = (a, b, w, h, r) => {
+    x.beginPath();
+    x.moveTo(a + r, b);
+    x.arcTo(a + w, b, a + w, b + h, r); x.arcTo(a + w, b + h, a, b + h, r);
+    x.arcTo(a, b + h, a, b, r); x.arcTo(a, b, a + w, b, r);
+    x.closePath();
+  };
+  x.fillStyle = BG; x.fillRect(0, 0, W, H);
+  x.fillStyle = PANEL; x.strokeStyle = BORDER; x.lineWidth = 2;
+  rr(24, 24, W - 48, H - 48, 24); x.fill(); x.stroke();
+
+  // header
+  x.textBaseline = "alphabetic"; x.textAlign = "left";
+  x.font = font(800, 44); x.fillStyle = FG;
+  x.fillText("Guess", 56, 100);
+  x.fillStyle = ACC;
+  x.fillText("Word", 56 + x.measureText("Guess").width, 100);
+  x.textAlign = "right"; x.font = font(500, 21); x.fillStyle = MUTED;
+  x.fillText(cfg && cfg.daily ? "每日挑战" : (LANGS[LANG].name + " · " + LANGS[LANG].badge), W - 56, 86);
+  x.fillText(cfg && cfg.daily ? cfg.daily : rangeLabel(cfg.lo, cfg.hi), W - 56, 114);
+
+  // answer + chips
+  const gc = board.filter(e => !e.isHint).length, hc = board.filter(e => e.isHint).length;
+  x.textAlign = "left";
+  x.font = font(800, 58); x.fillStyle = state === "won" ? GRN : RED;
+  x.fillText(cap(secret), 56, 228);
+  const chips = [ state === "won" ? gc + " 次猜中" : "未猜中", hc + " 次提示",
+                  cfg && cfg.daily ? "每日挑战" : (LANGS[LANG].badge + " " + rangeLabel(cfg.lo, cfg.hi)) ];
+  x.font = font(600, 21); x.strokeStyle = BORDER; x.lineWidth = 1.5;
+  let cx = 56;
+  for(const t of chips){
+    const tw = x.measureText(t).width + 34;
+    x.fillStyle = "#1a1e25"; rr(cx, 258, tw, 42, 21); x.fill(); x.stroke();
+    x.fillStyle = MUTED; x.textAlign = "center";
+    x.fillText(t, cx + tw / 2, 286);
+    cx += tw + 12;
+  }
+
+  // rank curve
+  const pts = curvePts();
+  const bx = 56, by = 340, bw = W - 112, bh = 430;
+  x.fillStyle = CARD; x.strokeStyle = BORDER;
+  rr(bx, by, bw, bh, 16); x.fill(); x.stroke();
+  if(pts.length){
+    const PL = 76, PR = 26, PT = 28, PB = 46;
+    const NMAX = Math.max(2, N);
+    const endN = pts[pts.length-1].n, span = Math.max(1, endN - 1);
+    const xs = n => pts.length <= 1 ? bx + (PL + bw - PR) / 2 : bx + PL + (n-1)/span * (bw - PL - PR);
+    const ys = r => by + PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (bh - PT - PB);
+    const ticks = [1, 10, 100, 1000].filter(t => t < NMAX).concat([NMAX]);
+    x.setLineDash([6, 8]); x.lineWidth = 1.5;
+    for(const t of ticks){
+      const yy = ys(t);
+      x.strokeStyle = BORDER; x.beginPath(); x.moveTo(bx + PL, yy); x.lineTo(bx + bw - PR, yy); x.stroke();
+      x.fillStyle = MUTED; x.font = font(500, 19); x.textAlign = "right";
+      x.fillText(fmt(t), bx + PL - 12, yy + (t === NMAX ? -8 : 7));
+    }
+    x.setLineDash([]);
+    if(pts.length > 1){
+      x.strokeStyle = ACC; x.lineWidth = 4; x.lineJoin = "round"; x.lineCap = "round"; x.globalAlpha = 0.85;
+      x.beginPath();
+      pts.forEach((p, i) => { const px = xs(p.n), py = ys(p.r); i ? x.lineTo(px, py) : x.moveTo(px, py); });
+      x.stroke(); x.globalAlpha = 1;
+    }
+    for(const p of pts){
+      const px = xs(p.n), py = ys(p.r);
+      if(p.r === 1){ x.fillStyle = GRN; x.beginPath(); x.arc(px, py, 10, 0, 7); x.fill(); }
+      else if(p.hint){
+        x.fillStyle = ORG; const s2 = 8;
+        x.beginPath(); x.moveTo(px, py - s2); x.lineTo(px + s2, py); x.lineTo(px, py + s2); x.lineTo(px - s2, py); x.closePath(); x.fill();
+      } else { x.fillStyle = ACC; x.beginPath(); x.arc(px, py, 6.5, 0, 7); x.fill(); }
+    }
+    x.fillStyle = MUTED; x.font = font(500, 19); x.textAlign = "center";
+    x.fillText("第1猜", bx + PL, by + bh - 16);
+    if(endN > 1) x.fillText("第" + endN + "猜", bx + bw - PR, by + bh - 16);
+  } else {
+    x.fillStyle = MUTED; x.font = font(500, 23); x.textAlign = "center";
+    x.fillText("本局没有可绘制的猜测记录", bx + bw / 2, by + bh / 2);
+  }
+  // caption + footer
+  x.textAlign = "center"; x.fillStyle = MUTED; x.font = font(500, 21);
+  x.fillText("每次猜测的词在词库中的名次 · 1 = 答案 · 对数刻度", W / 2, by + bh + 52);
+  x.font = font(600, 23); x.fillStyle = "#5d6470";
+  x.fillText(location.host || "GuessWord", W / 2, H - 68);
+  return cv;
+}
+let shareObjURL = null;
+function renderShareCard(){
+  try{
+    const cv = buildShareCard();
+    const set = (url, obj) => {
+      if(shareObjURL){ try{ URL.revokeObjectURL(shareObjURL); }catch(e){} shareObjURL = null; }
+      if(obj) shareObjURL = url;
+      $("shareImg").src = url;
+      const a = $("shareDl");
+      a.href = url;
+      a.download = "guessword-" + ((cfg && cfg.daily) ? cfg.daily : dailyStr()) + ".png";
+    };
+    if(cv.toBlob) cv.toBlob(b => b ? set(URL.createObjectURL(b), true) : set(cv.toDataURL("image/png"), false), "image/png");
+    else set(cv.toDataURL("image/png"), false);
+  }catch(e){ toast("生成分享图失败"); }
+}
+$("shareCardBtn").onclick = ()=>{ sfx.click(); openOv("shareOverlay"); renderShareCard(); };
+$("shareClose").onclick = ()=>{ closeOv("shareOverlay"); refocusGameInput(); };
 
 /* ---------- form ---------- */
 function doSubmit(){
@@ -1470,7 +1668,7 @@ refreshHome();
 renderLangRow();
 $("demoTrophy").innerHTML = IC.trophy;
 $("dictCount").textContent = N.toLocaleString("en-US");
-$("secretCount").textContent = LVIDX.filter(l=>l<=5).length.toLocaleString("en-US");
+$("secretCount").textContent = LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length.toLocaleString("en-US");
 window.__gw = {
   get answer(){ return secret || null; },
   get token(){ return gameToken; },
@@ -1478,6 +1676,7 @@ window.__gw = {
   rankOf: w => ranks && ranks.rankOf ? ranks.rankOf.get(w) : undefined,
   distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
   sampleWords: k => { const out = [], step = Math.max(1, Math.floor(N/k)); for(let i=0;i<N && out.length<k;i+=step) out.push([WORDS[i], LVIDX[i]]); return out; },
+  daily: (lang, date) => dailyWordFor(date || dailyStr(), lang || LANG),
   info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)})
 };
 warmLang();   // first game click should not wait for a cold isolate

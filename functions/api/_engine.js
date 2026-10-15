@@ -28,6 +28,11 @@ const LANGS = ["en", "ja", "ko", "fr", "de", "es"];
 const LV_COUNT = { en: 6, ja: 5, ko: 6, fr: 6, de: 6, es: 6 };
 const CHUNK_LIMIT = 64 * 1024 * 1024;      // sanity cap for vec assets
 
+// 谜底必须是玩家能打出来的词；与 js/app.js 的 secretOk 逐字一致（英文的过常用/屏蔽词在下注时被拒绝）
+const STOP_EN = new Set(["the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "must", "can", "i", "you", "he", "she", "it", "we", "they"]);
+const BLOCKED = ["rape", "rapes", "retard", "retards", "nigga", "niggas", "nigger", "niggers", "faggot", "faggots", "negro", "coon", "kike", "spastic"];
+function secretOk(L, w) { return L !== "en" || (!STOP_EN.has(w) && !BLOCKED.some((b) => w.startsWith(b))); }
+
 /* ---------- byte / json helpers ---------- */
 const te = new TextEncoder(), td = new TextDecoder();
 
@@ -270,16 +275,24 @@ export async function handle(context, kind) {
       if (request.method !== "POST") return J({ err: "method" }, 405);
       const b = await body(request);
       if (!b || !LANGS.includes(b.lang)) return J({ err: "bad request" }, 400);
-      const lo = Math.max(0, Math.min(LV_COUNT[b.lang] - 1, b.lo | 0));
-      const hi = Math.max(lo, Math.min(LV_COUNT[b.lang] - 1, b.hi | 0));
+      // 每日挑战：同一语言同一天对所有人给出同一个谜底（各语言互相独立随机）
+      const daily = (typeof b.daily === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.daily)) ? b.daily : null;
+      let lo = Math.max(0, Math.min(LV_COUNT[b.lang] - 1, b.lo | 0));
+      let hi = Math.max(lo, Math.min(LV_COUNT[b.lang] - 1, b.hi | 0));
+      if (daily) { lo = 0; hi = LV_COUNT[b.lang] - 1; }
       const M = await eng.loadMeta(b.lang);   // word list only: picking a secret needs no vectors
       const pool = [];
-      for (let i = 0; i < M.N; i++) if (M.LVIDX[i] >= lo && M.LVIDX[i] <= hi) pool.push(i);
+      for (let i = 0; i < M.N; i++) if (M.LVIDX[i] >= lo && M.LVIDX[i] <= hi && secretOk(b.lang, M.WORDS[i])) pool.push(i);
       if (!pool.length) return J({ err: "empty pool" }, 400);
-      const recent = new Set(Array.isArray(b.recent) ? b.recent.slice(-160).filter((w) => typeof w === "string") : []);
-      const fresh = pool.filter((i) => !recent.has(M.WORDS[i]));
-      const use = fresh.length > 30 ? fresh : pool;
-      const si = use[Math.floor(Math.random() * use.length)];
+      let si;
+      if (daily) {
+        si = pool[Math.floor(rng(`gw-daily-v1|${b.lang}|${daily}`)() * pool.length)];
+      } else {
+        const recent = new Set(Array.isArray(b.recent) ? b.recent.slice(-160).filter((w) => typeof w === "string") : []);
+        const fresh = pool.filter((i) => !recent.has(M.WORDS[i]));
+        const use = fresh.length > 30 ? fresh : pool;
+        si = use[Math.floor(Math.random() * use.length)];
+      }
       const t = await makeToken(key, { l: b.lang, lo, hi, s: M.WORDS[si], i: Date.now() });
       if (!t) return J({ err: "token" }, 500);
       return J({ t, pool: pool.length });

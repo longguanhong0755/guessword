@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 const ROOT = 'D:/workspace/guessword';
 const SITE = path.join(ROOT, 'site');
 const LANGS = process.argv.slice(2).length ? process.argv.slice(2) : ['en', 'ja', 'fr'];
+const LV_COUNTS = { en: 6, ja: 5, ko: 6, fr: 6, de: 6, es: 6 };
 
 /* ---------- asset access over the built site/ ---------- */
 function assetBytes(p) {
@@ -62,7 +63,7 @@ function clientPack(L) {   // decodePack() + GWMAP-free path
     const inv = 1 / Math.sqrt(n2) || 0;
     for (let d = 0; d < D2; d++) unit[i * D2 + d] *= inv;
   }
-  return { D: D2, N: N2, WORDS: words, UNIT: unit, IDX: new Map(words.map((w, i) => [w, i])) };
+  return { D: D2, N: N2, WORDS: words, LVIDX: (() => { const lv = new Uint8Array(meta.level.length); for (let i = 0; i < lv.length; i++) lv[i] = +meta.level[i]; return lv; })(), UNIT: unit, IDX: new Map(words.map((w, i) => [w, i])) };
 }
 function buildRanksRef(P, secretWord) {   // verbatim buildRanks()
   const P_D = P.D, P_N = P.N, P_W = P.WORDS, P_U = P.UNIT;
@@ -93,6 +94,10 @@ function buildRanksRef(P, secretWord) {   // verbatim buildRanks()
 // the client seeds rng() with the *current* language code, which equals the pack's language
 let CUR_LANG = 'en';
 function LANG_OF(P, w) { return CUR_LANG; }
+
+// daily-challenge pool filter (verbatim from js/app.js secretOk + the level range)
+const DAILY_STOP = new Set(["the","a","an","and","or","but","is","are","was","were","be","been","being","have","has","had","do","does","did","will","would","could","should","may","might","must","can","i","you","he","she","it","we","they"]);
+const DAILY_BLOCKED = ["rape","rapes","retard","retards","nigga","niggas","nigger","niggers","faggot","faggots","negro","coon","kike","spastic"];
 
 /* ---------- checks ---------- */
 let failures = 0;
@@ -195,6 +200,24 @@ for (const L of LANGS) {
   const rDefMiss = await handle({ request: new Request(base + '/api/def?lang=' + L + '&word=zzzzqqq'), env: fakeEnv }, 'def');
   const jDefMiss = await rDefMiss.json();
   if (jDefMiss.entry === null) ok('api/def miss -> entry:null'); else fail('api/def miss shape: ' + JSON.stringify(jDefMiss));
+
+  // daily challenge: (lang, date) -> word must match the client-side reference (pool + rng)
+  for (const date of ['2026-10-15', '2027-01-01']) {
+    const refPool = [];
+    const maxLv = LV_COUNTS[L] - 1;
+    for (let i = 0; i < P.N; i++) {
+      const l = P.LVIDX[i], w = P.WORDS[i];
+      if (l >= 0 && l <= maxLv && (L !== 'en' || (!DAILY_STOP.has(w) && !DAILY_BLOCKED.some((b) => w.startsWith(b))))) refPool.push(w);
+    }
+    const refWord = refPool[Math.floor(rngRef(`gw-daily-v1|${L}|${date}`)() * refPool.length)];
+    const rD = await handle(ctx(base + '/api/new', { lang: L, lo: 0, hi: 5, daily: date }), 'new');
+    const jD = await rD.json();
+    const rDH = await handle(ctx(base + '/api/hint', { t: jD.t, r: 1 }), 'hint');
+    const jDH = await rDH.json();
+    if (jD.pool !== refPool.length) fail(`daily pool ${jD.pool} vs ref ${refPool.length} (${L} ${date})`);
+    else if (jDH.word !== refWord) fail(`daily word "${jDH.word}" vs ref "${refWord}" (${L} ${date})`);
+    else ok(`daily ${date}: "${jDH.word}" (pool ${jD.pool}, matches client ref)`);
+  }
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PARITY CHECKS PASSED');

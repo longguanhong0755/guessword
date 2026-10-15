@@ -26,6 +26,7 @@
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5.5v13l11-6.5z"/></svg>
         开始猜词
       </button>
+      <button class="dailyBtn" id="dailyBtn"></button>
       <button class="resume" id="resumeBtn"></button>
     </div>
     <div class="langRow" id="langRow"></div>
@@ -126,7 +127,8 @@
         <span class="chip" id="chipMode"></span>
       </div>
       <div class="resBtns">
-        <button class="lbtn primary" id="shareBtn">复制结果</button>
+        <button class="lbtn primary" id="shareCardBtn">分享卡片</button>
+        <button class="lbtn" id="shareBtn">复制结果</button>
         <button class="lbtn" id="newWordBtn">再来一局</button>
         <button class="lbtn" id="boardBtn">看棋盘</button>
       </div>
@@ -200,6 +202,7 @@
   <div class="dialog">
     <h2>历史记录</h2>
     <p class="dlgBody" id="histSub"></p>
+    <div class="statStrip" id="histStats"></div>
     <div class="histList" id="histList"></div>
     <div class="dlgFoot">
       <button class="btnGhost" id="histClear">清空</button>
@@ -208,6 +211,18 @@
   </div>
 </div>
 
+
+<div class="overlay" id="shareOverlay">
+  <div class="dialog shareDlg">
+    <h2>分享卡片</h2>
+    <div class="sharePrev"><img id="shareImg" alt="战绩卡片"></div>
+    <p class="shareTip">长按图片可保存到相册，也可以点左下角按钮下载。</p>
+    <div class="dlgFoot">
+      <a class="btnGhost shareDl" id="shareDl" download="guessword.png">保存图片</a>
+      <button class="btnSolid" id="shareClose">完成</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast" role="status"></div>
 

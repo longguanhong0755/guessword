@@ -13,6 +13,10 @@
 - 词典：Wiktionary 释义（CC BY-SA）+ 中文翻译；非英语语言附读音（日语假名等），点任意词可查。线上按词查询（服务端词典分桶，`/api/def`），不再整包下载。词典未收录或加载失败时给出该语言的外部词典入口（剑桥/Jisho/NAVER/Larousse/Duden/RAE）与重试按钮。
 - 未完成的对局会全部自动存档（本地保存 token/棋盘），首页"继续上局"或历史记录里的"未完成"区随时可接着玩，切换语言也能恢复。
 - 结果页展示本局每次猜测的名次曲线：横轴为猜第几次、纵轴为该词在词库里的绝对名次（对数刻度，1 在顶），提示为橙色菱形；猜得很多时画布加宽、可左右滑动。
+- **每日挑战**：每天每种语言自动生成一道题——同日同语言全站同一个谜底、各语言互不相同（谜底 = 词表按日期确定性取样，客户端与服务端算出的一样）。第一局记为当天正式成绩，之后重玩算练习；历史记录里会带"每日挑战"标记。
+- **分享卡片**：结果页一键把本局画成图片（名次曲线 + 语言/难度 + 次数 + 站点地址），预览后可保存或发出去。
+- **跨局战绩统计**：历史记录弹窗顶部一栏——局数、胜率、当前连胜、最长连胜、平均猜中、最快猜中。
+- 谜底保证打得出来：英文的过常用词/屏蔽词不会被选为谜底；法/德输入的字符校验放宽了撇号、连字符与常见重音字母（aujourd'hui、Café 这类词能正常输入）。
 - 附加：生词本、历史记录（含语言标签）、明暗主题、音效、移动端适配。全程无 emoji，线条 SVG 图标。
 
 ## 直接玩
@@ -40,9 +44,9 @@
   - 多语言：`build-lang-vocab.py`（JLPT/延世/词频词表）→ `build-pack-lang.mjs`（量化打包）；`extract-kaikki-lang.py` + `merge-vocab-dict.py`（词典）
   - 维护工具：`split-master.py`（把单文件母本拆成当前结构）、`set-dict.mjs`（词典数据改动后回写 `js/data-<L>.js`）、`bundle.mjs`（离线单文件产物）
 - 测试：
-  - `test-rank-parity.mjs` — 服务端引擎 vs 客户端 `buildRanks()` 逐词逐位一致（六语言，含 HTTP 层）
-  - `test-online.py <url>` — 线上版全链路（不下载词向量、答题/提示/查词、未完成存档与跨语言续玩、预热请求、词典兜底与重试、回退本地模式）
-  - `test-split.py [url]` / `test-live.py` / `probe.py` / `diag-boot.py` — patchright 无头浏览器验证（`test-variant.py` 已被 `test-online.py` 取代删除；test-split 另含 30+ 猜长对局的名次曲线滚动断言）
+  - `test-rank-parity.mjs` — 服务端引擎 vs 客户端 `buildRanks()` 逐词逐位一致（六语言，含 HTTP 层与每日谜底取样）
+  - `test-online.py <url>` — 线上版全链路（不下载词向量、答题/提示/查词、未完成存档与跨语言续玩、预热请求、每日挑战确定性与记分、分享卡片、统计条、词典兜底与重试、回退本地模式）
+  - `test-split.py [url]` / `test-live.py` / `probe.py` / `diag-boot.py` — patchright 无头浏览器验证（`test-variant.py` 已被 `test-online.py` 取代删除；test-split 另含 30+ 猜长对局的名次曲线滚动断言与离线每日挑战）
 - `site/` — 构建产物（gitignore，随时可用 build-variant.mjs 重建）
 
 ## 数据管线注意事项

@@ -204,6 +204,31 @@ with sync_playwright() as p:
         };
     })()""")
 
+    # ---- daily challenge (offline): same word within the day, first run = official ----
+    pg.evaluate("document.getElementById('homeBtn').click()")
+    pg.wait_for_timeout(400)
+    pg.evaluate("document.getElementById('dailyBtn').click()")
+    pg.wait_for_function("document.querySelector('.screen.on').id === 'game' && document.querySelectorAll('#board .row').length === 0", timeout=30000)
+    pg.wait_for_timeout(600)
+    d1 = pg.evaluate("document.documentElement.getAttribute('data-gw-answer')")
+    result["daily_offline_word"] = d1
+    pg.fill("#guessInput", d1)
+    pg.press("#guessInput", "Enter")
+    pg.wait_for_function("document.querySelectorAll('#board .row').length >= 1", timeout=30000)
+    pg.evaluate("document.getElementById('resWord').textContent = ''")
+    pg.wait_for_function("(document.getElementById('resWord')||{}).textContent.length > 0", timeout=30000)
+    pg.evaluate("document.getElementById('homeBtn').click()")
+    pg.wait_for_timeout(400)
+    result["daily_btn_done"] = pg.evaluate("document.getElementById('dailyBtn').innerText")
+    pg.evaluate("document.getElementById('dailyBtn').click()")
+    pg.wait_for_function("document.querySelector('.screen.on').id === 'game' && document.querySelectorAll('#board .row').length === 0", timeout=30000)
+    pg.wait_for_timeout(600)
+    result["daily_offline_stable"] = (pg.evaluate("document.documentElement.getAttribute('data-gw-answer')") == d1)
+    # cross-game stats strip in the history dialog
+    pg.evaluate("document.getElementById('histHomeBtn').click()")
+    pg.wait_for_timeout(400)
+    result["hist_stats"] = pg.evaluate("document.getElementById('histStats').innerText.replace(/\\n+/g,' | ').slice(0,140)")
+
     b.close()
 
 print(json.dumps(result, ensure_ascii=False, indent=1))
