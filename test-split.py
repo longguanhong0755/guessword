@@ -19,6 +19,10 @@ setInterval(function(){
       var s = g.sampleWords(120);
       if (s && s.length) d.setAttribute('data-gw-words', JSON.stringify(s));
     }
+    if (g.getRange){
+      var r = g.getRange(), v = r.lo + ":" + r.hi + ":" + r.n;
+      if (d.getAttribute('data-gw-range') !== v) d.setAttribute('data-gw-range', v);
+    }
   }catch(e){}
 }, 150);
 """
@@ -37,13 +41,40 @@ with sync_playwright() as p:
     result["dictCount"] = pg.evaluate("document.getElementById('dictCount').textContent")
     result["langButtons"] = pg.evaluate("[...document.querySelectorAll('.langBtn')].map(b=>b.textContent)")
 
-    # ---- start an English game ----
+    # ---- start an English game (difficulty slider: default 全部, drag / keyboard / level taps) ----
     pg.evaluate("document.getElementById('startBtn').click()")
-    pg.wait_for_timeout(250)
-    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
-    pg.wait_for_timeout(150)
-    pg.evaluate("document.querySelectorAll('.lvCard')[1].click()")
-    pg.wait_for_timeout(150)
+    pg.wait_for_timeout(300)
+    result["slider_default"] = pg.evaluate("""(() => ({
+        range: document.documentElement.getAttribute('data-gw-range'),
+        labs: document.querySelectorAll('.lvLab').length,
+        info: document.getElementById('lvInfo').innerText.replace(/\\n+/g,' ')
+    }))()""")
+    geo = pg.evaluate("(() => { const r=document.getElementById('lvRail').getBoundingClientRect(); return {left:r.left, y:r.top+r.height/2, w:r.width}; })()")
+    pg.mouse.move(geo["left"], geo["y"])
+    pg.mouse.down()
+    pg.mouse.move(geo["left"] + geo["w"]*0.25, geo["y"], steps=10)
+    pg.mouse.up()
+    pg.wait_for_timeout(300)
+    result["slider_after_drag"] = pg.evaluate("document.documentElement.getAttribute('data-gw-range')")
+    pg.evaluate("document.getElementById('lvHlo').focus()")
+    pg.keyboard.press("ArrowRight")
+    pg.wait_for_timeout(300)
+    result["slider_after_key"] = pg.evaluate("document.documentElement.getAttribute('data-gw-range')")
+    pg.evaluate("(() => { const b=document.querySelector('.lvReset'); if(b) b.click(); })()")
+    pg.wait_for_timeout(300)
+    result["slider_after_reset"] = pg.evaluate("""(() => ({
+        range: document.documentElement.getAttribute('data-gw-range'),
+        resetShown: !!document.querySelector('.lvReset')
+    }))()""")
+    pg.evaluate("document.querySelectorAll('.lvLab')[0].click()")
+    pg.wait_for_timeout(200)
+    pg.evaluate("document.querySelectorAll('.lvLab')[1].click()")
+    pg.wait_for_timeout(300)
+    result["slider_after_taps"] = pg.evaluate("document.documentElement.getAttribute('data-gw-range')")
+    result["github_link"] = pg.evaluate("""(() => {
+        const a = document.getElementById('ghHomeBtn');
+        return {href: a.href, target: a.target, rel: a.rel, svg: !!a.querySelector('svg')};
+    })()""")
     pg.evaluate("document.getElementById('beginBtn').click()")
     pg.wait_for_timeout(900)
     result["placeholder_en"] = pg.evaluate("document.getElementById('guessInput').placeholder")
@@ -74,9 +105,9 @@ with sync_playwright() as p:
     result["placeholder_ja"] = pg.evaluate("document.getElementById('guessInput').placeholder")
     pg.evaluate("document.getElementById('startBtn').click()")
     pg.wait_for_timeout(250)
-    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.evaluate("document.querySelectorAll('.lvLab')[0].click()")
     pg.wait_for_timeout(150)
-    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.evaluate("document.querySelectorAll('.lvLab')[0].click()")
     pg.wait_for_timeout(150)
     pg.evaluate("document.getElementById('beginBtn').click()")
     pg.wait_for_timeout(900)
@@ -159,9 +190,9 @@ with sync_playwright() as p:
     pg.wait_for_timeout(700)
     pg.evaluate("document.getElementById('startBtn').click()")
     pg.wait_for_timeout(300)
-    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.evaluate("document.querySelectorAll('.lvLab')[0].click()")
     pg.wait_for_timeout(150)
-    pg.evaluate("document.querySelectorAll('.lvCard')[0].click()")
+    pg.evaluate("document.querySelectorAll('.lvLab')[0].click()")
     pg.wait_for_timeout(150)
     pg.evaluate("document.getElementById('beginBtn').click()")
     pg.wait_for_timeout(900)

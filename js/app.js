@@ -124,6 +124,7 @@ function activateLang(lang){
 
 /* ---------- state ---------- */
 const $ = id => document.getElementById(id);
+const coarsePtr = !!(window.matchMedia && window.matchMedia("(pointer:coarse)").matches);
 const LSKEY = "guessword-v2";
 const MODEL_VER = "nb1908b";   // embedding model tag; history saved under an older tag gets distances recomputed
 let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[], daily:{} };
@@ -367,7 +368,8 @@ const IC = {
   search:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>',
   clock:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
   x:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-  chevR:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>'
+  chevR:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+  github:'<svg class="ic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11 11 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.6-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>'
 };
 
 /* ---------- rendering ---------- */
@@ -386,7 +388,7 @@ function rowHTML(e, withMarker){
     <div class="rowContent"><span class="rowWord" data-w="${e.word}">${icon}${cap(e.word)}</span><button type="button" class="nbT${nbOn?" on":""}" data-w="${e.word}" aria-label="生词本">${nbOn?IC.bkFill:IC.bk}</button><span class="rowNum">${right}</span></div></div></div>`;
 }
 function animateRows(container){
-  const set = () => container.querySelectorAll(".fill").forEach(f => f.style.width = f.dataset.w + "%");
+  const set = () => container.querySelectorAll(".fill").forEach(f => f.style.transform = "scaleX(" + (f.dataset.w/100) + ")");
   requestAnimationFrame(()=>requestAnimationFrame(set));
   setTimeout(set, 120);
 }
@@ -1212,11 +1214,9 @@ async function resumeGame(gid){
 }
 $("startBtn").onclick = ()=>{
   sfx.click();
-  selLo = null; selHi = null;
-  refreshLvCards();
-  renderLvSel();
+  refreshLvCards();   // rebuild the range slider for the current language, default = 全部
   switchScreen("setup");
-  warmLang();   // preload the language while the player picks a level range
+  warmLang();   // preload the language while the player picks a range
 };
 $("backHome").onclick = ()=>{ switchScreen("home"); refreshHome(); };
 const LV_META = {
@@ -1233,99 +1233,140 @@ const SRC_NOTE = {
 };
 const lvMetaOf = lang => LV_META[lang] || LV_META.common6;
 const srcNoteOf = lang => SRC_NOTE[lang] || SRC_NOTE.common;
-let LV_COUNTS = [];
-function refreshLvCards(){
+let LV_COUNTS = [], LV_SECRET = [];
+const lvN = () => LEVELS.length;
+const lvFrac = i => { const n = lvN(); return n<=1 ? 0 : i*100/(n-1); };
+function refreshLvCards(){   // rebuild the range slider for the current language
   LV_COUNTS = LEVELS.map((_, i)=>LVIDX.reduce((a,l)=>a+(l===i?1:0), 0));
-  $("lvGrid").innerHTML = lvMetaOf(LANG).map((m,i)=>
-    `<button class="lvCard" data-i="${i}"><span class="nm">${m.en}</span><span class="ds">${m.zh}</span><span class="ct">${LV_COUNTS[i].toLocaleString("en-US")} 词</span></button>`).join("");
+  LV_SECRET = LEVELS.map((_, i)=>{ let c=0; for(let k=0;k<N;k++) if(LVIDX[k]===i && secretOk(WORDS[k])) c++; return c; });
+  const meta = lvMetaOf(LANG);
+  $("lvMarks").innerHTML = meta.map((_,i)=>`<i style="left:${lvFrac(i)}%"></i>`).join("");
+  $("lvLabs").innerHTML = meta.map((m,i)=>
+    `<button type="button" class="lvLab" data-i="${i}" style="left:${lvFrac(i)}%"><b>${m.en}</b><span>${m.zh}</span><i>${fmt(LV_SECRET[i])}</i></button>`).join("");
   const sn = $("srcNote"); if(sn) sn.textContent = srcNoteOf(LANG);
-  $("dictCount").textContent = N.toLocaleString("en-US");
-  $("secretCount").textContent = LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length.toLocaleString("en-US");
-  bindLvCards();
+  $("dictCount").textContent = fmt(N);
+  $("secretCount").textContent = fmt(LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length);
+  resetRange();
 }
-/* ---------- 难度选择:点击两点框区间 / 按住拖动框选(鼠标+触屏) / 悬停实时预览 ---------- */
-const coarsePtr = window.matchMedia && window.matchMedia("(pointer:coarse)").matches;
-let hoverIdx = null, dragging = false, dragStart = null, suppressClick = false;
+/* ---------- 难度范围:双滑块(默认全选;拖动圆点,或依次点选起止等级) ---------- */
+let lvDrag = null, lvNext = "lo";   // lvNext = which handle the next level tap moves
+function resetRange(){ selLo = 0; selHi = lvN()-1; lvNext = "lo"; renderLvSel(); }
+function rangeCount(lo, hi){ let c=0; for(let i=lo;i<=hi;i++) c += LV_SECRET[i]||0; return c; }
+function lvIdxFromX(x){
+  const r = $("lvRail").getBoundingClientRect();
+  const n = lvN();
+  const f = r.width ? (x - r.left)/r.width : 0;
+  return Math.max(0, Math.min(n-1, Math.round(f*(n-1))));
+}
 function renderLvSel(){
-  const cards = document.querySelectorAll(".lvCard");
-  let lo = selLo, hi = selHi, pending = false;
-  if(dragging){
-    if(hoverIdx==null || hoverIdx===dragStart){ lo = dragStart; hi = null; pending = true; }
-    else { lo = Math.min(dragStart, hoverIdx); hi = Math.max(dragStart, hoverIdx); }
-  } else if(selLo!=null && selHi==null){
-    pending = true;
-    if(hoverIdx!=null && hoverIdx!==selLo){ lo = Math.min(selLo, hoverIdx); hi = Math.max(selLo, hoverIdx); }
-  }
-  cards.forEach((x,i)=>{
-    const inR = lo!=null && hi!=null && i>=lo && i<=hi;
-    x.classList.toggle("sel", inR);
-    x.classList.toggle("pend", pending && !inR && lo!=null && i===lo);
+  const n = lvN();
+  if(selLo==null || selHi==null){ selLo = 0; selHi = n-1; }
+  selLo = Math.max(0, Math.min(n-1, selLo));
+  selHi = Math.max(selLo, Math.min(n-1, selHi));
+  const fl = lvFrac(selLo), fh = lvFrac(selHi);
+  $("lvFill").style.left = fl + "%";
+  $("lvFill").style.right = (100-fh) + "%";
+  const stacked = selLo===selHi;
+  const hlo = $("lvHlo"), hhi = $("lvHhi");
+  hlo.style.left = fl + "%"; hhi.style.left = fh + "%";
+  hlo.classList.toggle("stack", stacked); hhi.classList.toggle("stack", stacked);
+  [[hlo, selLo], [hhi, selHi]].forEach(([b, v])=>{
+    b.setAttribute("aria-valuemin", "0");
+    b.setAttribute("aria-valuemax", String(n-1));
+    b.setAttribute("aria-valuenow", String(v));
+    b.setAttribute("aria-valuetext", LEVELS[v]);
   });
-  const info = $("lvInfo"), begin = $("beginBtn");
-  const resetBtn = selLo!=null ? `<button class="lvReset" type="button">重置</button>` : "";
-  if(selLo==null && !dragging){
-    info.innerHTML = `${IC.tag} ${coarsePtr ? "点一个等级作为起点,再点另一个等级框出区间" : "点击一个等级作为起点,或按住拖动直接框选区间"}`;
-    begin.textContent = "请先选择区间";
-    begin.classList.remove("ready");
-  } else if(hi!=null){
-    const real = selHi!=null && !dragging;
-    info.innerHTML = `${IC.tag} ${real?"难度区间":"预览区间"} <b>${rangeLabel(lo, hi)}</b> · 区间内共 <b>${poolForRange(lo, hi).length.toLocaleString("en-US")}</b> 个候选词 ${real?resetBtn:""}`;
-    begin.textContent = real ? "开始游戏" : "请先选择区间";
-    begin.classList.toggle("ready", real);
-  } else {
-    info.innerHTML = `${IC.tag} 起点 <b>${LEVELS[lo]}</b> · ${coarsePtr ? "再点一个等级完成区间,点起点本身 = 单一级别" : "点击或拖到另一等级框出区间,再点起点本身 = 单一级别"} ${resetBtn}`;
-    begin.textContent = "请先选择区间";
-    begin.classList.remove("ready");
-  }
-  info.classList.add("show");
+  $("lvLabs").querySelectorAll(".lvLab").forEach(x=>x.classList.toggle("on", +x.dataset.i>=selLo && +x.dataset.i<=selHi));
+  const resetBtn = (selLo>0 || selHi<n-1) ? `<button class="lvReset" type="button">重置</button>` : "";
+  $("lvInfo").innerHTML = `${IC.tag} ${selLo===selHi?"单一级别":"区间"} <b>${rangeLabel(selLo, selHi)}</b>` +
+    ` · <span class="lvCnt">共 <b>${fmt(rangeCount(selLo, selHi))}</b> 个候选词</span> ${resetBtn}`;
+  $("lvInfo").classList.add("show");
 }
-function lvIdxFromPoint(x, y){
-  const el = document.elementFromPoint(x, y);
-  const card = el && el.closest ? el.closest(".lvCard") : null;
-  return card ? +card.dataset.i : null;
-}
-function bindLvCards(){
-  document.querySelectorAll(".lvCard").forEach(c=>{
-    c.addEventListener("pointerdown", e=>{
-      if(e.pointerType==="mouse" && e.button!==0) return;
-      dragging = true; dragStart = +c.dataset.i; hoverIdx = dragStart; suppressClick = false;
-      renderLvSel();
-    });
-    c.addEventListener("mouseenter", ()=>{ if(dragging) return; hoverIdx = +c.dataset.i; renderLvSel(); });
-    c.onclick = ()=>{
-      if(suppressClick){ suppressClick = false; return; }
-      sfx.click();
-      const i = +c.dataset.i;
-      if(selLo==null || selHi!=null){ selLo = i; selHi = null; }
-      else { const lo0 = selLo; selLo = Math.min(lo0, i); selHi = Math.max(lo0, i); }
-      hoverIdx = null;
-      renderLvSel();
-    };
-  });
-}
-$("lvGrid").addEventListener("mouseleave", ()=>{ hoverIdx = null; if(!dragging) renderLvSel(); });
-document.addEventListener("pointermove", e=>{
-  if(!dragging) return;
-  const i = lvIdxFromPoint(e.clientX, e.clientY);
-  if(i!=null && i!==hoverIdx){ hoverIdx = i; renderLvSel(); }
-});
-document.addEventListener("pointerup", e=>{
-  if(!dragging) return;
-  dragging = false;
-  const i = lvIdxFromPoint(e.clientX, e.clientY);
-  if(i!=null) hoverIdx = i;
-  if(hoverIdx!=null && hoverIdx!==dragStart){
-    selLo = Math.min(dragStart, hoverIdx); selHi = Math.max(dragStart, hoverIdx);
-    hoverIdx = null; sfx.click(); suppressClick = true;
-    setTimeout(()=>{ suppressClick = false; }, 400);
-  }
+function lvMove(h, i){   // drag/clamp: handles never cross
+  i = Math.max(0, Math.min(lvN()-1, i));
+  const cur = h==="lo" ? selLo : selHi;
+  if(i === cur) return false;
+  if(h==="lo") selLo = Math.min(i, selHi); else selHi = Math.max(i, selLo);
+  if((h==="lo" ? selLo : selHi) === cur) return false;
   renderLvSel();
+  return true;
+}
+function lvTap(i){   // tap a level: set the next anchor (start, then end)
+  i = Math.max(0, Math.min(lvN()-1, i));
+  if(lvNext==="lo"){
+    if(i <= selHi) selLo = i; else { selLo = selHi; selHi = i; }
+  } else {
+    if(i >= selLo) selHi = i; else { selHi = selLo; selLo = i; }
+  }
+  lvNext = lvNext==="lo" ? "hi" : "lo";
+  renderLvSel();
+}
+function lvVibe(type){
+  if(type==="mouse") return;
+  try{ if(navigator.vibrate) navigator.vibrate(6); }catch(e){}
+}
+function lvDown(e){
+  if(e.pointerType==="mouse" && e.button!==0) return;
+  const hEl = e.target.closest ? e.target.closest(".lvHandle") : null;
+  const i = lvIdxFromX(e.clientX);
+  const h = hEl ? hEl.dataset.h : (Math.abs(i-selLo) <= Math.abs(i-selHi) ? "lo" : "hi");
+  const mouse = e.pointerType==="mouse";
+  lvDrag = { id:e.pointerId, h, type:e.pointerType, x:e.clientX, y:e.clientY, active:mouse };
+  try{ $("lvRail").setPointerCapture(e.pointerId); }catch(err){}
+  if(mouse){   // desktop: direct manipulation from the first pixel
+    $("lvSlide").classList.add("dragging");
+    if(lvMove(h, i)) lvVibe(e.pointerType);
+  }
+  e.preventDefault();
+}
+function lvMoveEv(e){
+  if(!lvDrag || e.pointerId!==lvDrag.id) return;
+  if(!lvDrag.active){   // touch: only a clearly horizontal drag grabs a handle (vertical = page scroll)
+    const dx = e.clientX - lvDrag.x, dy = e.clientY - lvDrag.y;
+    if(Math.abs(dx) < 7 || Math.abs(dx) <= Math.abs(dy)) return;
+    lvDrag.active = true;
+    $("lvSlide").classList.add("dragging");
+  }
+  if(lvMove(lvDrag.h, lvIdxFromX(e.clientX))) lvVibe(lvDrag.type);
+}
+function lvUp(e){
+  if(!lvDrag || (e && e.pointerId!=null && e.pointerId!==lvDrag.id)) return;
+  const d = lvDrag;
+  lvDrag = null;
+  $("lvSlide").classList.remove("dragging");
+  if(!d.active && e && e.clientX!=null){   // a tap (no drag): move the nearest handle to the tapped level
+    if(lvMove(d.h, lvIdxFromX(e.clientX))) lvVibe(d.type);
+  }
+  lvNext = d.h==="lo" ? "hi" : "lo";   // the next level tap moves the other end
+}
+function lvKey(e){
+  const h = e.currentTarget.dataset.h;
+  let v = h==="lo" ? selLo : selHi;
+  if(e.key==="ArrowLeft" || e.key==="ArrowDown") v--;
+  else if(e.key==="ArrowRight" || e.key==="ArrowUp") v++;
+  else if(e.key==="Home") v = 0;
+  else if(e.key==="End") v = lvN()-1;
+  else return;
+  e.preventDefault();
+  lvMove(h, v);
+  lvNext = h==="lo" ? "hi" : "lo";
+}
+$("lvRail").addEventListener("pointerdown", lvDown);
+$("lvRail").addEventListener("pointermove", lvMoveEv);
+document.addEventListener("pointerup", lvUp);
+document.addEventListener("pointercancel", lvUp);
+$("lvHlo").addEventListener("keydown", lvKey);
+$("lvHhi").addEventListener("keydown", lvKey);
+$("lvLabs").addEventListener("click", e=>{
+  const b = e.target.closest ? e.target.closest(".lvLab") : null;
+  if(!b) return;
+  sfx.click();
+  if(coarsePtr) lvVibe("touch");
+  lvTap(+b.dataset.i);
 });
-document.addEventListener("pointercancel", ()=>{ if(dragging){ dragging = false; renderLvSel(); } });
 $("lvInfo").addEventListener("click", e=>{
-  if(e.target.closest(".lvReset")){ sfx.click(); selLo = null; selHi = null; hoverIdx = null; renderLvSel(); }
+  if(e.target.closest(".lvReset")){ sfx.click(); resetRange(); }
 });
-renderLvSel();
 $("beginBtn").onclick = ()=>{
   if(selLo==null || selHi==null) return;
   sfx.click();
@@ -1641,7 +1682,12 @@ async function selectLang(lang){
   if(!packAvailable(lang)){
     const btn = document.querySelector(`.langBtn[data-lang="${lang}"]`);
     if(btn) btn.classList.add("busy");
-    try{ await ensurePack(lang); }catch(e){}
+    let lastPct = 0;
+    const prog = f => {   // download progress for the offline path (online only fetches the light word list)
+      const p = Math.round(f*10)*10;
+      if(p>lastPct){ lastPct = p; if(p < 100) toast(`正在下载${LANGS[lang].name}词库 ${p}%`); }
+    };
+    try{ await ensurePack(lang, prog); }catch(e){}
     if(btn) btn.classList.remove("busy");
     if(!packAvailable(lang)){ toast("该语言数据加载失败,请重试"); return; }
   }
@@ -1662,6 +1708,7 @@ syncAcUI();
 $("histHomeBtn").innerHTML = IC.clock;
 $("nbHomeBtn").innerHTML = IC.book;
 $("dlHomeBtn").innerHTML = IC.search;
+$("ghHomeBtn").innerHTML = IC.github;
 if(!REMOTE) loadDict();
 switchScreen("home");
 refreshHome();
@@ -1677,6 +1724,8 @@ window.__gw = {
   distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
   sampleWords: k => { const out = [], step = Math.max(1, Math.floor(N/k)); for(let i=0;i<N && out.length<k;i+=step) out.push([WORDS[i], LVIDX[i]]); return out; },
   daily: (lang, date) => dailyWordFor(date || dailyStr(), lang || LANG),
-  info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)})
+  info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)}),
+  setRange: (lo, hi) => { selLo = lo; selHi = hi; lvNext = "lo"; renderLvSel(); return {lo:selLo, hi:selHi}; },
+  getRange: () => ({lo: selLo, hi: selHi, n: lvN()})
 };
 warmLang();   // first game click should not wait for a cold isolate

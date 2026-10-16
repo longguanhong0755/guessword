@@ -42,10 +42,10 @@ with sync_playwright() as p:
     # ---- home -> setup -> start ----
     pg.evaluate("document.getElementById('startBtn').click()")
     pg.wait_for_timeout(300)
-    result["setupCards"] = pg.evaluate("document.querySelectorAll('.lvCard').length")
-    pg.evaluate("document.querySelectorAll('.lvCard')[1].click()")
+    result["setupCards"] = pg.evaluate("document.querySelectorAll('.lvLab').length")
+    pg.evaluate("document.querySelectorAll('.lvLab')[1].click()")
     pg.wait_for_timeout(200)
-    pg.evaluate("document.querySelectorAll('.lvCard')[1].click()")  # same card twice = single-level range
+    pg.evaluate("document.querySelectorAll('.lvLab')[1].click()")  # same card twice = single-level range
     pg.wait_for_timeout(200)
     pg.evaluate("document.getElementById('beginBtn').click()")
     pg.wait_for_timeout(900)

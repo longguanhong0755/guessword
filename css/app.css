@@ -15,18 +15,19 @@
   html,body{margin:0;padding:0;min-height:100%}
   body{
     font-family:var(--font); color:var(--fg); line-height:1.55;
-    background:var(--bg); min-height:100vh; -webkit-font-smoothing:antialiased;
-    -webkit-tap-highlight-color:transparent;
+    background:var(--bg); min-height:100vh; min-height:100dvh; -webkit-font-smoothing:antialiased;
+    -webkit-tap-highlight-color:transparent; overscroll-behavior-y:contain;
   }
-  button{font-family:inherit; cursor:pointer; color:inherit; background:none; border:none; padding:0}
+  html{-webkit-text-size-adjust:100%; text-size-adjust:100%}
+  button{font-family:inherit; cursor:pointer; color:inherit; background:none; border:none; padding:0; touch-action:manipulation}
   button:disabled{cursor:default; opacity:.4}
   input{font-family:inherit}
   ::placeholder{color:var(--muted)}
   svg.ic{width:18px;height:18px;flex-shrink:0}
 
-  .screen{display:none; min-height:100vh}
+  .screen{display:none; min-height:100vh; min-height:100dvh}
   .screen.on{display:flex; flex-direction:column}
-  .wrap{width:100%; max-width:640px; margin:0 auto; padding:0 18px}
+  .wrap{width:100%; max-width:640px; margin:0 auto; padding:0 calc(18px + env(safe-area-inset-right)) 0 calc(18px + env(safe-area-inset-left))}
 
   /* ---------- line buttons & chips ---------- */
   .lbtn{
@@ -46,13 +47,17 @@
 
   /* ---------- HOME ---------- */
   #home{align-items:center; justify-content:center; padding:36px 18px}
-  .homeTop{position:fixed; top:0; left:0; right:0; display:flex; justify-content:flex-end; gap:8px; padding:16px 20px; padding-top:calc(16px + env(safe-area-inset-top))}
+  .homeTop{position:fixed; top:0; left:0; right:0; display:flex; justify-content:flex-end; gap:8px;
+    padding:16px calc(20px + env(safe-area-inset-right)) 16px calc(20px + env(safe-area-inset-left));
+    padding-top:calc(16px + env(safe-area-inset-top))}
   .iconBtn{
     width:38px; height:38px; border-radius:10px; border:1px solid var(--border);
     display:flex; align-items:center; justify-content:center; background:var(--panel);
     transition:border-color .15s, background .15s;
   }
   .iconBtn:hover{border-color:var(--border2); background:var(--panel2)}
+  a.iconBtn{color:var(--fg); text-decoration:none}
+  .ghBtn svg.ic{width:20px;height:20px}
   .hero{max-width:560px; width:100%; text-align:center; padding:10px 0}
   .kicker{font-size:11px; font-weight:700; letter-spacing:.34em; color:var(--muted); text-transform:uppercase}
   .logo{margin:10px 0 0; font-size:clamp(40px,7.5vw,58px); font-weight:800; letter-spacing:-.03em; line-height:1.05}
@@ -84,20 +89,44 @@
   .setupTitle{margin:0; font-size:22px; font-weight:800}
   .setupSub{color:var(--muted); font-size:14px; margin:4px 0 24px}
   .secLabel{font-size:12px; font-weight:700; letter-spacing:.14em; color:var(--muted); margin:0 0 10px}
-  .lvGrid{display:grid; grid-template-columns:repeat(6,1fr); gap:8px; user-select:none; -webkit-user-select:none; touch-action:pan-y}
-  @media(max-width:560px){ .lvGrid{grid-template-columns:repeat(3,1fr)} }
-  .lvCard{
-    border:1.5px solid var(--border); border-radius:12px; padding:14px 6px 12px; text-align:center;
-    display:flex; flex-direction:column; align-items:center; gap:2px; background:var(--panel);
-    transition:border-color .15s, background .15s;
+  /* dual-handle range slider (default = full range) */
+  .lvSlide{padding-top:2px; user-select:none; -webkit-user-select:none}
+  .lvRail{position:relative; height:46px; margin:0 16px; touch-action:pan-y; cursor:pointer}
+  .lvTrack,.lvFill{position:absolute; top:50%; height:6px; transform:translateY(-50%); border-radius:3px}
+  .lvTrack{left:0; right:0; background:var(--border)}
+  .lvFill{left:0; right:100%; background:var(--accent); transition:left .16s ease, right .16s ease}
+  .lvSlide.dragging .lvFill{transition:none}
+  .lvMarks{position:absolute; inset:0; pointer-events:none}
+  .lvMarks i{position:absolute; top:50%; width:4px; height:4px; margin:-2px 0 0 -2px; border-radius:50%; background:var(--border2)}
+  .lvHandle{
+    position:absolute; top:50%; left:0; width:46px; height:46px; margin:-23px 0 0 -23px;
+    display:flex; align-items:center; justify-content:center; touch-action:none; z-index:2;
+    transition:left .16s ease;
   }
-  .lvCard:hover{border-color:var(--border2)}
-  .lvCard.sel{border-color:var(--accent); background:var(--panel2)}
-  .lvCard.pend{border-color:var(--accent); border-style:dashed}
-  .lvCard .nm{font-weight:800; font-size:17px; letter-spacing:.02em}
-  .lvCard.sel .nm,.lvCard.pend .nm{color:var(--accent)}
-  .lvCard .ds{font-size:11px; color:var(--muted); line-height:1.4}
-  .lvCard .ct{font-size:10.5px; font-weight:600; color:var(--muted); opacity:.85}
+  .lvSlide.dragging .lvHandle{transition:none}
+  .lvHandle::after{
+    content:""; width:26px; height:26px; border-radius:50%; background:var(--panel);
+    border:3px solid var(--accent); box-shadow:0 1px 6px rgba(0,0,0,.35);
+    transition:transform .12s ease;
+  }
+  html[data-theme="light"] .lvHandle::after{box-shadow:0 1px 6px rgba(20,30,50,.2)}
+  .lvHandle:hover::after,.lvHandle:focus-visible::after{transform:scale(1.1)}
+  .lvHandle:focus-visible{outline:none}
+  .lvHandle:focus-visible::after{box-shadow:0 0 0 5px rgba(59,130,246,.3)}
+  .lvHandle.stack[data-h="lo"]{margin-left:-32px}
+  .lvHandle.stack[data-h="hi"]{margin-left:-14px}
+  .lvLabs{position:relative; height:54px; margin:6px 16px 0}
+  .lvLab{
+    position:absolute; top:0; transform:translateX(-50%); width:64px; padding:2px 0 6px;
+    display:flex; flex-direction:column; align-items:center; background:none; border-radius:8px;
+    text-align:center; color:var(--fg); touch-action:manipulation;
+  }
+  .lvLab b{font-size:12.5px; font-weight:800; letter-spacing:.02em; line-height:1.5}
+  .lvLab span{font-size:10px; color:var(--muted); line-height:1.4}
+  .lvLab i{font-style:normal; font-size:9.5px; color:var(--muted); opacity:.75; line-height:1.4}
+  .lvLab.on b{color:var(--accent)}
+  .lvLab:hover b{color:var(--accent)}
+  .lvTip{color:var(--muted); font-size:12px; line-height:1.5; margin:8px 0 0}
   .langRow{display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:16px}
   .langBtn{border:1px solid var(--border2); background:transparent; color:var(--muted); border-radius:999px; padding:7px 14px; font-size:12.5px; font-weight:700; cursor:pointer; font-family:inherit; letter-spacing:.02em}
   .langBtn.on{border-color:var(--accent); color:var(--accent)}
@@ -109,16 +138,16 @@
   }
   .lvInfo.show{display:flex}
   .lvInfo b{color:var(--fg); font-weight:700}
+  .lvCnt{white-space:nowrap}
   .lvReset{margin-left:auto; flex-shrink:0; font-size:12.5px; font-weight:600; color:var(--muted); text-decoration:underline; text-underline-offset:3px}
   .lvReset:hover{color:var(--fg)}
   .setupBtns{display:flex; gap:10px; margin-top:24px}
   .setupBtns .lbtn{flex:1; padding:12px; font-size:15px}
-  .setupBtns .primary{opacity:.35; pointer-events:none}
-  .setupBtns .primary.ready{opacity:1; pointer-events:auto}
 
   /* ---------- GAME ---------- */
   #game .topbar{
-    display:flex; align-items:center; gap:10px; padding:10px 14px;
+    display:flex; align-items:center; gap:10px;
+    padding:10px calc(14px + env(safe-area-inset-right)) 10px calc(14px + env(safe-area-inset-left));
     padding-top:calc(10px + env(safe-area-inset-top));
     border-bottom:1px solid var(--border); background:var(--panel);
     position:sticky; top:0; z-index:30;
@@ -130,10 +159,11 @@
     border:1px solid var(--border); color:var(--muted); white-space:nowrap;
   }
   .topbar .sp{flex:1}
-  .gameWrap{max-width:640px; width:100%; margin:0 auto; padding:26px 18px 90px}
+  .gameWrap{max-width:640px; width:100%; margin:0 auto;
+    padding:26px calc(18px + env(safe-area-inset-right)) 90px calc(18px + env(safe-area-inset-left))}
   .inputRow{display:flex; gap:8px; position:relative}
   .inputGroup{
-    flex:1; display:flex; align-items:center; gap:10px; height:48px; padding:0 14px;
+    flex:1; min-width:0; display:flex; align-items:center; gap:10px; height:48px; padding:0 14px;
     border:1px solid var(--border); border-radius:10px; background:var(--panel);
     transition:border-color .15s;
   }
@@ -181,7 +211,7 @@
     position:relative; height:46px; border-radius:10px; overflow:hidden; width:100%;
     background:var(--panel); border:1px solid var(--border);
   }
-  .fill{position:absolute; left:0; top:0; bottom:0; width:0%; transition:width .6s cubic-bezier(.25,1,.5,1)}
+  .fill{position:absolute; left:0; top:0; bottom:0; width:100%; transform:scaleX(0); transform-origin:left center; transition:transform .6s cubic-bezier(.25,1,.5,1)}
   .fill.green{background:var(--green)} .fill.orange{background:var(--orange)} .fill.red{background:var(--red)}
   .rowContent{position:relative; z-index:1; height:100%; display:flex; align-items:center; justify-content:space-between; padding:0 15px}
   .rowWord{flex:1; min-width:0; font-weight:700; font-size:16.5px; letter-spacing:.02em; display:flex; align-items:center; gap:7px}
@@ -329,11 +359,13 @@
   .rcEmpty{color:var(--muted); font-size:13px; padding:18px 0; text-align:center}
 
   /* ---------- DIALOGS ---------- */
-  .overlay{position:fixed; inset:0; background:rgba(8,10,14,.55); z-index:50; display:none; align-items:center; justify-content:center; padding:18px}
+  .overlay{position:fixed; inset:0; background:rgba(8,10,14,.55); z-index:50; display:none; align-items:center; justify-content:center;
+    padding:calc(18px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right)) calc(18px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left))}
   html[data-theme="light"] .overlay{background:rgba(40,50,70,.3)}
   .overlay.open{display:flex}
-  .dialog{width:min(94vw,460px); max-height:86vh; overflow:auto; padding:22px 24px; border-radius:14px;
-    background:var(--panel); border:1px solid var(--border)}
+  .dialog{width:min(94vw,460px); max-height:86vh; overflow:auto; overscroll-behavior:contain; padding:22px 24px; border-radius:14px;
+    background:var(--panel); border:1px solid var(--border); -webkit-overflow-scrolling:touch}
+  @supports(height:100svh){ .dialog{max-height:86svh} }
   .dialog h2{margin:0 0 8px; font-size:18px; font-weight:800}
   .dlgBody{color:var(--fg); font-size:14.5px; margin:0 0 18px}
   .dlgFoot{display:flex; justify-content:flex-end; gap:9px}
@@ -353,20 +385,45 @@
   #toast.show{opacity:1; transform:translate(-50%,0)}
 
   /* ---------- responsive / touch ---------- */
-  @media(pointer:coarse){
-    .nbAdd input,.dlSearch input{font-size:16px}
-  }
+  .nbList,.dlEntry,.histList,.acBox,.rankChart{overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
   @media(max-width:620px){
-    .topbar{gap:6px; padding:8px 10px; padding-top:calc(8px + env(safe-area-inset-top))}
+    .topbar{gap:6px;
+      padding:8px calc(10px + env(safe-area-inset-right)) 8px calc(10px + env(safe-area-inset-left));
+      padding-top:calc(8px + env(safe-area-inset-top))}
     .topbar .miniLogo{display:none}
     .topbar .iconBtn{width:34px; height:34px}
     .badge{font-size:10.5px; padding:3px 8px}
-    .gameWrap{padding:18px 14px 80px}
+    .gameWrap{padding:18px calc(14px + env(safe-area-inset-right)) 80px calc(14px + env(safe-area-inset-left))}
+  }
+  @media(max-width:400px){
+    .resultsBtn{padding:0 13px}
+    .resultsBtn .rbT{display:none}
+    .chip{padding:4px 10px; font-size:12px}
   }
   @media(max-width:560px){
     #home,#setup{padding:24px 14px}
-    .homeTop{padding:12px; padding-top:calc(12px + env(safe-area-inset-top))}
+    .homeTop{padding:12px calc(12px + env(safe-area-inset-right)) 12px calc(12px + env(safe-area-inset-left));
+      padding-top:calc(12px + env(safe-area-inset-top))}
     .dialog{padding:18px 16px}
-    .lvCard{padding:12px 4px 10px}
-    .lvCard .nm{font-size:16px}
+    .lvRail{margin:0 12px}
+    .lvLabs{margin:6px 12px 0}
+    .lvLab{width:56px}
+    .lvLab i{font-size:9px}
+  }
+  /* bigger tap targets / stronger hints on touch screens */
+  @media(pointer:coarse){
+    .nbAdd input,.dlSearch input{font-size:16px}
+    .iconBtn{width:42px; height:42px}
+    .topbar .iconBtn{width:40px; height:40px}
+    .nbT{padding:9px}
+    .nbDel{font-size:20px; padding:6px 10px}
+    .langBtn{padding:10px 16px}
+    .ddItem{padding:12px}
+    .acItem{padding:12px}
+    .histRow{padding:12px}
+    .histCont{padding:7px 14px}
+    .lvReset{padding:6px 4px}
+  }
+  @media(prefers-reduced-motion:reduce){
+    *,*::before,*::after{transition-duration:.01ms !important; animation-duration:.01ms !important}
   }

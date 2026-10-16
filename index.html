@@ -16,6 +16,7 @@
     <button class="iconBtn" id="dlHomeBtn" aria-label="dictionary"></button>
     <button class="iconBtn" id="nbHomeBtn" aria-label="notebook"></button>
     <button class="iconBtn themeT" aria-label="theme"></button>
+    <a class="iconBtn ghBtn" id="ghHomeBtn" href="https://github.com/longguanhong0755/guessword" target="_blank" rel="noopener" aria-label="GitHub 项目" title="GitHub 项目"></a>
   </div>
   <div class="hero">
     <div class="kicker">GUESS · THE · WORD</div>
@@ -40,8 +41,18 @@
   <div class="wrap setupCard">
     <h2 class="setupTitle">选择难度区间</h2>
     <p class="setupSub"><span id="srcNote">神秘词取自区间内的牛津/CEFR-J 官方分级词表</span> · 词库共 <b id="dictCount">…</b> 个词,其中 <b id="secretCount">…</b> 个可作神秘词。</p>
-    <div class="secLabel">难度等级</div>
-    <div class="lvGrid" id="lvGrid"></div>
+    <div class="secLabel">难度范围</div>
+    <div class="lvSlide" id="lvSlide">
+      <div class="lvRail" id="lvRail">
+        <div class="lvTrack"></div>
+        <i class="lvFill" id="lvFill"></i>
+        <div class="lvMarks" id="lvMarks"></div>
+        <button type="button" class="lvHandle" id="lvHlo" data-h="lo" role="slider" aria-label="起始等级"></button>
+        <button type="button" class="lvHandle" id="lvHhi" data-h="hi" role="slider" aria-label="结束等级"></button>
+      </div>
+      <div class="lvLabs" id="lvLabs"></div>
+    </div>
+    <p class="lvTip">拖动两端圆点调整范围,或依次点选起止等级(同一等级点两次 = 只玩该等级)</p>
     <div class="lvInfo" id="lvInfo"></div>
     <div class="setupBtns">
       <button class="lbtn" id="backHome">返回</button>
@@ -107,7 +118,7 @@
       </div>
       <button type="button" class="resultsBtn" id="resultsBtn">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>
-        结果
+        <span class="rbT">结果</span>
       </button>
     </form>
 
