@@ -22,7 +22,8 @@ cd /d/workspace/guessword
 node build-variant.mjs "$URL1"
 
 cd /d/workspace/guessword/site
-wrangler pages deploy . --branch=main --commit-dirty=true 2>&1 | tail -4
+OUT2=$(wrangler pages deploy . --branch=main --commit-dirty=true 2>&1) || { echo "$OUT2" | tail -8; exit 1; }
+echo "$OUT2" | tail -4
 
 # ---- 自托管同步（loongsite VPS）：过渡期非致命，失败只告警 ----
 # deploy-vps.sh 会无参 rebuild（SECHOST 置空）覆盖 site/，别拿之后的 site/ 再 wrangler 部署
