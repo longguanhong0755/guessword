@@ -2,6 +2,8 @@
 
 多语言语义猜词游戏（Semantle 类）。
 
+**线上直接玩：<https://guessword.loongsite.com/>** —— 六种语言，打开就能玩，无需安装（自托管服务器；原 Cloudflare Pages 版与 `guessword.cc.cd` 已于 2026-10-16 下线）。
+
 - 玩法：猜一个单词，系统告诉你它和神秘词的语义距离排名（1 = 答案，越小越近），提示不限次，难度按等级区间选择（双滑块：默认全区间，拖动两端圆点或依次点选起止等级，同一等级点两次 = 只玩该等级；键盘方向键可调）。
 - **六种语言**：英语（牛津 CEFR A1–C2）、日语（JLPT N5–N1）、韩语（延世韩国语 1–6 册）、法语/德语/西班牙语（语料词频 6 档）。
 - 词库：英语 21,376 词（已清理专名与语料垃圾、合并变形）；日语 21,867（JLPT 7,608 谜底 + 扩展）；韩语 6,411；法/德/西各约 3.9 万。
@@ -40,6 +42,7 @@
 - `build-variant.mjs` — 生成部署变体到 `site/`：壳（~0.4MB）+ 每语言词表 meta + 词向量/词典分片（本地回退用）+ 词典 256 分桶（`/api/def` 用）+ `functions/`，并注入 loader
 - `deploy.sh` — 发布：默认 build + 推自托管服务器（`deploy-vps.sh`，失败即报错）。CF Pages 已于 2026-10-16 退役（项目已删）；旧的 Pages 两阶段发布保留在 `GW_CF=1` 开关后（恢复需先在 CF 重建 Pages 项目），凭据在 gitignore 的 `deploy.local.env`
 - `deploy-vps.sh` — 发布到自托管服务器（loongsite VPS，`ssh` 走 `loongsite-vps` 别名）：无参 rebuild → sha256 清单增量对比 → tar 增量包经 ssh 上传 → 服务器端原子切换/重启引擎/冒烟。`deploy.sh` 调用它（现在它是唯一的发布目标）。注意它产出的 `site/` 不含 SECHOST，别拿它再 wrangler 部署
+- `wrangler.toml` — CF Pages 退役后保留，仅供 `GW_CF=1` 旧发布路径与本地 `wrangler pages dev site` 调试使用；线上已不经过 Cloudflare
 - `build/` — 数据管线脚本：
   - 词向量：`nb-extract.mjs` / `nb-fallback.mjs` / `nb-swap.mjs`（英语），`extract-multi.mjs`（多语言单遍提取）
   - 词表手术：`extract-kaikki.py` / `plan-vocab.py` / `apply-vocab.mjs`
