@@ -1,7 +1,7 @@
 import json, time, sys
 from patchright.sync_api import sync_playwright
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "https://guessword-173.pages.dev/"
+URL = sys.argv[1] if len(sys.argv) > 1 else "https://guessword.loongsite.com/"
 events = []
 
 with sync_playwright() as p:
@@ -26,7 +26,9 @@ with sync_playwright() as p:
                 bootOv: bo ? (bo.style.display || 'unset') : null,
                 bootOvText: bo ? bo.innerText.replace(/\\n+/g,' | ').slice(0,160) : null,
                 barW: bp ? (bp.style.width || getComputedStyle(bp).width) : null,
-                ready: typeof window.__gw !== 'undefined'
+                // main-world globals are invisible from patchright's isolated world,
+                // so readiness is judged from the DOM (dictCount filled + boot overlay hidden)
+                ready: !!(dc && dc.textContent && dc.textContent !== '\u2026' && (!bo || bo.style.display === 'none'))
             };
         }""")
         print(f"t+{round(time.time()-t0,1)}s: " + json.dumps(st, ensure_ascii=False), flush=True)
