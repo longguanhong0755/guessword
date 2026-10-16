@@ -23,3 +23,9 @@ node build-variant.mjs "$URL1"
 
 cd /d/workspace/guessword/site
 wrangler pages deploy . --branch=main --commit-dirty=true 2>&1 | tail -4
+
+# ---- 自托管同步（loongsite VPS）：过渡期非致命，失败只告警 ----
+# deploy-vps.sh 会无参 rebuild（SECHOST 置空）覆盖 site/，别拿之后的 site/ 再 wrangler 部署
+if [ -f /d/workspace/guessword/deploy-vps.sh ]; then
+  ( cd /d/workspace/guessword && bash deploy-vps.sh ) || echo "WARN: VPS sync failed (CF deploy unaffected)"
+fi

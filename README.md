@@ -38,6 +38,7 @@
 - `build/compose.mjs` — 把上面这些合成单文件形态（构建与打包共用）
 - `build-variant.mjs` — 生成部署变体到 `site/`：壳（~0.4MB）+ 每语言词表 meta + 词向量/词典分片（本地回退用）+ 词典 256 分桶（`/api/def` 用）+ `functions/`，并注入 loader
 - `deploy.sh` — 两阶段发布到 Cloudflare Pages（需要 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，可放在 gitignore 的 `deploy.local.env` 里）
+- `deploy-vps.sh` — 发布到自托管服务器（loongsite VPS，`ssh` 走 `loongsite-vps` 别名）：无参 rebuild → sha256 清单增量对比 → tar 增量包经 ssh 上传 → 服务器端原子切换/重启引擎/冒烟。`deploy.sh` 末尾自动调用（过渡期非致命）。注意它产出的 `site/` 不含 SECHOST，别拿它再 wrangler 部署
 - `build/` — 数据管线脚本：
   - 词向量：`nb-extract.mjs` / `nb-fallback.mjs` / `nb-swap.mjs`（英语），`extract-multi.mjs`（多语言单遍提取）
   - 词表手术：`extract-kaikki.py` / `plan-vocab.py` / `apply-vocab.mjs`
@@ -45,6 +46,7 @@
   - 维护工具：`split-master.py`（把单文件母本拆成当前结构）、`set-dict.mjs`（词典数据改动后回写 `js/data-<L>.js`）、`bundle.mjs`（离线单文件产物）
 - 测试：
   - `test-rank-parity.mjs` — 服务端引擎 vs 客户端 `buildRanks()` 逐词逐位一致（六语言，含 HTTP 层与每日谜底取样）
+  - `test-rank-parity-remote.mjs <url> [langs|all]` — 远程逐位 parity（验收自托管部署的硬证据）：从目标站现拉 meta+词向量构建本地参考，经 `/api/hint r=1` 取回谜底后，比对 `/api/guess` 与 `/api/hint` 的名次与距离逐位一致
   - `test-online.py <url>` — 线上版全链路（不下载词向量、答题/提示/查词、未完成存档与跨语言续玩、预热请求、每日挑战确定性与记分、分享卡片、统计条、词典兜底与重试、回退本地模式）
   - `test-split.py [url]` / `test-live.py` / `probe.py` / `diag-boot.py` — patchright 无头浏览器验证（`test-variant.py` 已被 `test-online.py` 取代删除；test-split 另含 30+ 猜长对局的名次曲线滚动断言与离线每日挑战）
 - `site/` — 构建产物（gitignore，随时可用 build-variant.mjs 重建）
