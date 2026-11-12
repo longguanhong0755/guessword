@@ -98,7 +98,25 @@ function getPack(lang){
   const mapFn = PACK_MAP[lang];
   let mapStr = "";
   try{ mapStr = mapFn ? (mapFn() || "") : ""; }catch(e){ mapStr = ""; }
-  return packCache[lang] = decodePack(src, mapStr);
+  const P = decodePack(src, mapStr);
+  annotatePool(P, lang);
+  return packCache[lang] = P;
+}
+// Rank pool = graded vocabulary (levels 0..N-1; the ungraded level 9 bucket is
+// excluded) minus closed-class/function words. Non-pool words stay guessable
+// and are ranked relative to the pool, so a good synonym in level 9 still
+// scores near the top without ever being picked as a hint or secret.
+function annotatePool(P, lang){
+  const nLv = (LANGS[lang] || LANGS.en).levels.length;
+  const mask = new Uint8Array(P.N), idx = [];
+  for(let i=0;i<P.N;i++){
+    const l = P.LVIDX[i];
+    if(l >= 0 && l < nLv && poolOk(P.WORDS[i], lang)){ mask[i] = 1; idx.push(i); }
+  }
+  P.POOL_MASK = mask;
+  P.POOL = new Int32Array(idx);
+  P.POOL_N = idx.length;
+  return P;
 }
 function packAvailable(lang){ try{ return !!(PACK_SRC[lang] && PACK_SRC[lang]()); }catch(e){ return false; } }
 // load a language: online mode fetches only the word list, offline decodes the full vectors
@@ -126,7 +144,7 @@ function activateLang(lang){
 const $ = id => document.getElementById(id);
 const coarsePtr = !!(window.matchMedia && window.matchMedia("(pointer:coarse)").matches);
 const LSKEY = "guessword-v2";
-const MODEL_VER = "nb1908b";   // embedding model tag; history saved under an older tag gets distances recomputed
+const MODEL_VER = "nb1908c";   // embedding + ranking-scheme tag (c = pool-rank distances)
 let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[], daily:{} };
 try{ const raw = localStorage.getItem(LSKEY); if(raw){ store = Object.assign(store, JSON.parse(raw)); } }catch(e){}
 if(!Array.isArray(store.notebook)) store.notebook = [];
@@ -175,7 +193,7 @@ function buildRanks(secretWord, lang){
   if(!P) return null;
   const P_IDX = P.IDX, P_N = P.N, P_D = P.D, P_W = P.WORDS, P_U = P.UNIT;
   const si = P_IDX.get(secretWord);
-  if(si === undefined) return null;
+  if(si === undefined || !P_U) return null;
   const scores = new Float64Array(P_N);
   for(let i=0;i<P_N;i++){
     if(i===si){ scores[i] = 2; continue; }
@@ -183,32 +201,50 @@ function buildRanks(secretWord, lang){
     for(let d=0;d<P_D;d++) dot += P_U[off+d]*P_U[soff+d];
     scores[i] = dot + rng(lang+"|"+secretWord+"|"+P_W[i])()*1e-6;
   }
-  const order = new Array(P_N);
-  for(let i=0;i<P_N;i++) order[i]=i;
-  order.sort((a,b)=> scores[b]-scores[a] || (P_W[a]<P_W[b]?-1:1));
-  const rankOf = new Map(), wordAt = new Array(P_N), distOf = new Array(P_N);
-  const K = 3000/P_N;
-  let prevDist = 0;
-  for(let r=0;r<P_N;r++){
-    const i = order[r];
-    rankOf.set(P_W[i], r+1);
-    wordAt[r] = P_W[i];
-    // compress ranks into ~1..3000 while keeping distances unique & monotonic
-    const d = Math.max(prevDist+1, 1 + Math.round(r*K));
-    distOf[r] = d; prevDist = d;
+  const poolN = P.POOL_N, pool = P.POOL;
+  const order = new Array(poolN);
+  for(let k=0;k<poolN;k++) order[k] = pool[k];
+  order.sort((a,b)=> scores[b]-scores[a] || (P_W[a]<P_W[b]?-1:(P_W[a]>P_W[b]?1:0)));
+  const rankOf = new Map(), wordAt = new Array(poolN);
+  for(let k=0;k<poolN;k++){
+    const i = order[k];
+    rankOf.set(P_W[i], k+1);
+    wordAt[k] = P_W[i];
   }
-  return rankCache[key] = { rankOf, wordAt, distOf, N:P_N, K, lang };
+  // Non-pool words (ungraded level 9, function words) are ranked by insertion
+  // into the pool order: 1 + number of pool words that score above them.
+  for(let i=0;i<P_N;i++){
+    if(P.POOL_MASK[i]) continue;
+    const s = scores[i], w = P_W[i];
+    let lo = 0, hi = poolN;
+    while(lo < hi){
+      const mid = (lo+hi) >> 1, j = order[mid];
+      if(scores[j] > s || (scores[j] === s && P_W[j] < w)) lo = mid+1; else hi = mid;
+    }
+    // rank 1 is reserved for the secret: a non-pool word that outscores every
+    // pool word (e.g. an ungraded inflected form) must not look like a win
+    rankOf.set(w, w === secretWord ? 1 : Math.max(2, lo+1));
+  }
+  // a legacy save may carry a secret that is not in the pool: it still owns
+  // rank 1, so demote the top pool word to keep rank 1 unique
+  if(poolN && !P.POOL_MASK[si]){ rankOf.set(P_W[order[0]], 2); wordAt[0] = secretWord; }
+  // distance is the pool rank itself (1 = secret); one extra slot covers a
+  // non-pool guess ranked just below the last pool word
+  const distOf = new Array(poolN+1);
+  for(let r=0;r<=poolN;r++) distOf[r] = r+1;
+  return rankCache[key] = { rankOf, wordAt, distOf, N:poolN, poolN, lang };
 }
 
 /* ---------- puzzle pools: selected level + the one below ---------- */
-// 谜底必须是玩家能打出来的词：英文的过常用词/屏蔽词在下注时会被拒绝，不能当谜底
-function secretOk(w, lang){
-  if((lang || LANG) === "en") return !STOP_EN.has(w) && !BLOCKED.some(b => w.startsWith(b));
-  return true;
+// A word is a valid secret/hint only if it is graded and not a function word.
+// English hard-blocked stems are never valid either.
+function poolOk(w, lang){
+  lang = lang || LANG;
+  return !isStopWord(lang, w) && !(lang === "en" && isBlocked(w));
 }
 function poolForRange(lo, hi){
   const out = [];
-  for(let i=0;i<N;i++) if(LVIDX[i]>=lo && LVIDX[i]<=hi && secretOk(WORDS[i])) out.push(WORDS[i]);
+  for(let i=0;i<N;i++) if(LVIDX[i]>=lo && LVIDX[i]<=hi && LVIDX[i]<LEVELS.length && poolOk(WORDS[i])) out.push(WORDS[i]);
   return out;
 }
 function poolFor(levelIdx){ return poolForRange(Math.max(0, levelIdx-1), levelIdx); }
@@ -233,7 +269,7 @@ function dailyWordFor(date, lang){
   if(!P) return null;
   const maxLv = (LANGS[lang] ? LANGS[lang].levels.length : 6) - 1;
   const pool = [];
-  for(let i=0;i<P.N;i++){ const l = P.LVIDX[i]; if(l >= 0 && l <= maxLv && secretOk(P.WORDS[i], lang)) pool.push(P.WORDS[i]); }
+  for(let i=0;i<P.N;i++){ const l = P.LVIDX[i]; if(l >= 0 && l <= maxLv && poolOk(P.WORDS[i], lang)) pool.push(P.WORDS[i]); }
   if(!pool.length) return null;
   return pool[Math.floor(rng(DAILY_KEY + "|" + lang + "|" + date)() * pool.length)];
 }
@@ -247,6 +283,7 @@ function persistCurrent(){
   if(REMOTE && !gameToken) return;   // /api/new still in flight: nothing to save yet
   const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
                 board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null), n:(e.n||null) })),
+                rn: (ranks && ranks.N) || null,
                 at: Date.now() };
   if(cfg.daily) rec.daily = cfg.daily;
   if(REMOTE) rec.token = gameToken; else rec.secret = secret;
@@ -258,7 +295,8 @@ function persistCurrent(){
 }
 function finishToHistory(){
   store.history.push({ lo:cfg.lo, hi:cfg.hi, secret, state, lang: cfg.lang || LANG, daily: cfg.daily || undefined,
-                       board:board.map(e=>({word:e.word,isHint:!!e.isHint,distance:e.distance})), at:Date.now(), mv:MODEL_VER });
+                       board:board.map(e=>({word:e.word,isHint:!!e.isHint,distance:e.distance})),
+                       n:(ranks && ranks.N) || null, at:Date.now(), mv:MODEL_VER });
   while(store.history.length > 300) store.history.shift();
   if(secret){ store.recent.push(secret); while(store.recent.length > 200) store.recent.shift(); }
   if(cfg) store.games = store.games.filter(g => g.gid !== cfg.gid);
@@ -282,16 +320,14 @@ function recalcMetrics(){
 }
 
 /* ---------- validation ---------- */
-const STOP_EN = new Set(["the","a","an","and","or","but","is","are","was","were","be","been","being","have","has","had","do","does","did","will","would","could","should","may","might","must","can","i","you","he","she","it","we","they"]);
-const BLOCKED = ["rape","rapes","retard","retards","nigga","niggas","nigger","niggers","faggot","faggots","negro","coon","kike","spastic"];
 function validateGuess(raw){
   const w = raw.trim().toLowerCase();
   if(!w.length) return {valid:false, reason:"too-short"};
   if(w.length > 45) return {valid:false, reason:"too-long"};
   if(!LANGS[LANG].chars.test(w)) return {valid:false, reason:"invalid-character"};
-  if(LANG==="en" && BLOCKED.some(b => w.startsWith(b))) return {valid:false, reason:"disallowed"};
+  if(LANG==="en" && isBlocked(w)) return {valid:false, reason:"disallowed"};
   if(board.some(e => e.word === w)) return {valid:false, reason:"duplicate", word:w};
-  if(LANG==="en" && STOP_EN.has(w)) return {valid:false, reason:"too-common"};
+  if(isStopWord(LANG, w)) return {valid:false, reason:"too-common"};
   return {valid:true, word:foldWord(w)};
 }
 function foldWord(w){
@@ -302,12 +338,14 @@ function foldWord(w){
 /* ---------- hint target (nearest unused rank closer than best) ---------- */
 function boardRanks(){ return board.map(e => e.r).filter(x => x != null); }
 function pickHintRank(giveUp){
-  const n = ranks.N;
+  const n = (ranks && ranks.N) || poolSize();
   const rs = boardRanks();
   const used = new Set(rs);
   if(giveUp) return 1;
+  if(n <= 1) return 1;
   const best = rs.length ? Math.min(...rs) : null;
-  if(best === null) return Math.max(2, Math.round(1 + (1000-1)/ranks.K));
+  // first hint: land in the top ~5% of the pool (a real clue, not a needle)
+  if(best === null) return Math.max(2, Math.min(n, Math.round(n*0.05)));
   if(best <= 20){
     for(let x=best-1; x>=2; x--) if(!used.has(x)) return x;
     for(let x=best+1; x<=20; x++) if(!used.has(x)) return x;
@@ -373,11 +411,21 @@ const IC = {
 };
 
 /* ---------- rendering ---------- */
-function barWidth(d){
-  const n = d > 3000 ? 0.01 : 0.01 + 0.99*Math.pow(Math.min(Math.max((3000-d)/3000,0),1), 3.5);
-  return 100*n;
+// Pool size of a language, used to normalize the bar/curve when no live game
+// ranks object is available (history, share card, language switch).
+function poolSize(lang){
+  try{ const P = getPack(lang || LANG); if(P && P.POOL_N) return P.POOL_N; }catch(e){}
+  return 3000;
 }
-const barColor = d => d<=300 ? "green" : d<=1500 ? "orange" : "red";
+function barWidth(d, n){
+  n = n || (ranks && ranks.N) || poolSize();
+  const p = Math.min(Math.max((d-1)/Math.max(1, n), 0), 1);
+  return 100*(0.01 + 0.99*Math.pow(1-p, 3.5));
+}
+function barColor(d, n){
+  n = n || (ranks && ranks.N) || poolSize();
+  return d <= Math.max(10, n*0.02) ? "green" : d <= Math.max(50, n*0.10) ? "orange" : "red";
+}
 function rowHTML(e, withMarker){
   const win = e.distance===1 && !e.isHint;
   const icon = e.isHint ? (e.distance===1 ? IC.flag : IC.bulb) : "";
@@ -497,6 +545,7 @@ async function submitGuess(raw){
     try{
       const j = await apiPost("/guess", { t: gameToken, words:[word] });
       it = j.items && j.items[0];
+      if(j.n && ranks) ranks.N = j.n;   // keep the pool scale in sync after a resume/migration
     }catch(e){
       busy = false;
       result = {type:"error", msg:"网络异常,请重试"};
@@ -539,6 +588,7 @@ async function requestHint(giveUp){
     try{
       const j = await apiPost("/hint", { t: gameToken, r: tr });
       word = j.word; d = j.d; r = j.r || tr;
+      if(j.n && ranks) ranks.N = j.n;
     }catch(e){
       busy = false;
       result = {type:"error", msg:"网络异常,请重试"};
@@ -601,7 +651,7 @@ function curvePts(){
 function rankCurveSVG(){
   const pts = curvePts();
   if(!pts.length) return "";
-  const NMAX = Math.max(2, N);
+  const NMAX = Math.max(2, (ranks && ranks.N) || poolSize());
   const H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
   const endN = pts[pts.length-1].n;
   const span = Math.max(1, endN - 1);
@@ -978,19 +1028,22 @@ function fmtWhen(at){
 }
 function histGameRows(g){
   const gl = (g.lang && LANGS[g.lang]) ? g.lang : "en";
-  let dOf = null, rOf = null;
+  let dOf = null, rOf = null, rgN = 0;
   if(g.secret){
-    try{ const rg = buildRanks(g.secret, gl); if(rg){ dOf = rg.distOf; rOf = rg.rankOf; } }catch(e){}
+    try{ const rg = buildRanks(g.secret, gl); if(rg){ dOf = rg.distOf; rOf = rg.rankOf; rgN = rg.N; } }catch(e){}
   }
+  // recomputed ranks live on the current pool scale; only fall back to the
+  // size stored with the game (or today's pool) when vectors are unavailable
+  const pn = rgN || g.n || poolSize(gl);
   const distOf = e => {
-    if(e.distance && g.mv===MODEL_VER) return e.distance;   // finished games store the distance
-    if(e.d != null) return e.d;                             // unfinished games store it too
-    if(rOf){ const r = rOf.get(e.word); if(r) return dOf[r-1]; }
-    return 3001;
+    if(rOf){ const r = rOf.get(e.word); if(r) return dOf[r-1]; }  // offline: recompute in the current pool
+    if(e.distance) return e.distance;                              // finished games store the distance
+    if(e.d != null) return e.d;                                    // unfinished games store it too
+    return pn + 1;
   };
   return [...(g.board||[])].sort((a,b)=>distOf(a)-distOf(b)).map(e=>{
     const dist = distOf(e);
-    return `<div class="hRow"><div class="hFill" style="width:${barWidth(dist)}%;background:var(--${barColor(dist)})"></div><span class="hw">${e.isHint?IC.bulbSm:""}${escHtml(cap(e.word))}${e.isHint?'<i class="hHint">提示</i>':""}</span><span class="hn">${dist===1 ? (e.isHint?"揭晓":"答案") : fmt(dist)}</span></div>`;
+    return `<div class="hRow"><div class="hFill" style="width:${barWidth(dist, pn)}%;background:var(--${barColor(dist, pn)})"></div><span class="hw">${e.isHint?IC.bulbSm:""}${escHtml(cap(e.word))}${e.isHint?'<i class="hHint">提示</i>':""}</span><span class="hn">${dist===1 ? (e.isHint?"揭晓":"答案") : fmt(dist)}</span></div>`;
   }).join("");
 }
 function histRowHTML(g, opts){
@@ -1100,7 +1153,7 @@ function acSuggest(q){
   const out = [];
   for(const i of acOrder()){
     const w = WORDS[i];
-    if(w && w.length>q.length && w.startsWith(q) && !guessed.has(w) && !STOP_EN.has(w) && !BLOCKED.some(b=>w.startsWith(b))){
+    if(w && w.length>q.length && w.startsWith(q) && !guessed.has(w) && !isStopWord(LANG, w) && !(LANG==="en" && isBlocked(w))){
       out.push(i);
       if(out.length>=8) break;
     }
@@ -1238,14 +1291,14 @@ const lvN = () => LEVELS.length;
 const lvFrac = i => { const n = lvN(); return n<=1 ? 0 : i*100/(n-1); };
 function refreshLvCards(){   // rebuild the range slider for the current language
   LV_COUNTS = LEVELS.map((_, i)=>LVIDX.reduce((a,l)=>a+(l===i?1:0), 0));
-  LV_SECRET = LEVELS.map((_, i)=>{ let c=0; for(let k=0;k<N;k++) if(LVIDX[k]===i && secretOk(WORDS[k])) c++; return c; });
+  LV_SECRET = LEVELS.map((_, i)=>{ let c=0; for(let k=0;k<N;k++) if(LVIDX[k]===i && poolOk(WORDS[k])) c++; return c; });
   const meta = lvMetaOf(LANG);
   $("lvMarks").innerHTML = meta.map((_,i)=>`<i style="left:${lvFrac(i)}%"></i>`).join("");
   $("lvLabs").innerHTML = meta.map((m,i)=>
     `<button type="button" class="lvLab" data-i="${i}" style="left:${lvFrac(i)}%"><b>${m.en}</b><span>${m.zh}</span><i>${fmt(LV_SECRET[i])}</i></button>`).join("");
   const sn = $("srcNote"); if(sn) sn.textContent = srcNoteOf(LANG);
   $("dictCount").textContent = fmt(N);
-  $("secretCount").textContent = fmt(LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length);
+  $("secretCount").textContent = fmt(LVIDX.filter((l, i) => l >= 0 && l < LEVELS.length && poolOk(WORDS[i])).length);
   resetRange();
 }
 /* ---------- 难度范围:双滑块(默认全选;拖动圆点,或依次点选起止等级) ---------- */
@@ -1394,12 +1447,15 @@ async function startGame(lo, hi, resumeGid, dailyDate){
       // resume a saved game (any language): board comes back as saved
       if(g.token && REMOTE){
         busy = true;
-        ranks = { N, K:3000/N, remote:true };
+        const savedN = g.rn || 0;
+        ranks = { N: savedN || N, remote:true };
         gameToken = g.token;
         board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, n:e.n, distance:e.d }));
-        if(board.some(e => e.r == null || e.d == null)){
+        // old saves have no pool size and carry full-pack ranks: refetch them once
+        if(!savedN || board.some(e => e.r == null || e.d == null)){
           try{
             const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
+            if(j.n) ranks.N = j.n;
             board = (j.items || []).map((it, i) => {   // the API answers in request order
               const e = board[i];
               return it ? { ...e, r:it.r, d:it.d, distance:it.d } : e;
@@ -1426,7 +1482,7 @@ async function startGame(lo, hi, resumeGid, dailyDate){
         // the first guess/hint awaits pendingNew (see ensureToken)
         pendingNew = apiPost("/new", { lang: LANG, lo, hi, daily: cfg.daily || undefined, recent: store.recent.slice(-160) })
           .then(j => {
-            gameToken = j.t; ranks = { N, K:3000/N, remote:true };
+            gameToken = j.t; ranks = { N: j.n || N, remote:true };
             if(result && result.type === "preparing"){ result = null; renderAll(); }
             persistCurrent();
             return j.t;
@@ -1487,7 +1543,7 @@ $("newWordBtn").onclick = async ()=>{
     result = {type:"preparing"};
     pendingNew = apiPost("/new", { lang: LANG, lo: cfg.lo, hi: cfg.hi, recent: store.recent.slice(-160) })
       .then(j => {
-        gameToken = j.t; ranks = { N, K:3000/N, remote:true };
+        gameToken = j.t; ranks = { N: j.n || N, remote:true };
         if(result && result.type === "preparing"){ result = null; renderAll(); }
         persistCurrent();
         return j.t;
@@ -1567,7 +1623,7 @@ function buildShareCard(){
   rr(bx, by, bw, bh, 16); x.fill(); x.stroke();
   if(pts.length){
     const PL = 76, PR = 26, PT = 28, PB = 46;
-    const NMAX = Math.max(2, N);
+    const NMAX = Math.max(2, (ranks && ranks.N) || poolSize());
     const endN = pts[pts.length-1].n, span = Math.max(1, endN - 1);
     const xs = n => pts.length <= 1 ? bx + (PL + bw - PR) / 2 : bx + PL + (n-1)/span * (bw - PL - PR);
     const ys = r => by + PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (bh - PT - PB);
@@ -1715,7 +1771,7 @@ refreshHome();
 renderLangRow();
 $("demoTrophy").innerHTML = IC.trophy;
 $("dictCount").textContent = N.toLocaleString("en-US");
-$("secretCount").textContent = LVIDX.filter((l, i) => l <= 5 && secretOk(WORDS[i])).length.toLocaleString("en-US");
+$("secretCount").textContent = LVIDX.filter((l, i) => l >= 0 && l < LEVELS.length && poolOk(WORDS[i])).length.toLocaleString("en-US");
 window.__gw = {
   get answer(){ return secret || null; },
   get token(){ return gameToken; },

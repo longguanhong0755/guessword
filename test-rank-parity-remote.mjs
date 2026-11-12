@@ -16,7 +16,7 @@
    ===================================================================== */
 import fs from 'node:fs';
 import path from 'node:path';
-import { LV_COUNTS, decodePack, buildRanksRef } from './build/parity-ref.mjs';
+import { LV_COUNTS, decodePack, buildRanksRef, poolOkRef } from './build/parity-ref.mjs';
 
 const ALL = ['en', 'ja', 'ko', 'fr', 'de', 'es'];
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
@@ -91,11 +91,13 @@ for (const L of LANGS) {
 
   const ref = buildRanksRef(P, secret, L);
   if (!ref) { fail(`secret "${secret}" not in deployed word list`); continue; }
+  if (jNew.n !== ref.N) fail(`/api/new n=${jNew.n} vs ref rank pool ${ref.N}`);
+  else ok(`/api/new reports rank-pool size ${jNew.n}`);
 
   // sample: spread + rank-adjacent words (exercises the 1e-6 tie jitter) + bounds + a non-vocab probe
   const sample = [];
   for (let k = 0; k < 30; k++) sample.push(P.WORDS[Math.floor(k * P.N / 30)]);
-  for (const k of [1, 2, 3, 10, 100, 1000]) sample.push(ref.wordAt[Math.min(k, P.N) - 1]);
+  for (const k of [1, 2, 3, 10, 100, 1000]) sample.push(ref.wordAt[Math.min(k, ref.N) - 1]);
   sample.push(P.WORDS[0], P.WORDS[P.N - 1], secret);
   const words = [...new Set(sample)].slice(0, 45);
   const wordsWithNeg = [...words, 'zzzzqqq'];
@@ -112,7 +114,7 @@ for (const L of LANGS) {
   if (!bad) ok(`/api/guess ranks+distances identical for ${wordsWithNeg.length} words (incl. non-vocab -> null)`);
 
   let hbad = 0;
-  const ks = [1, 2, 3, 4, 7, 15, 42, 100, 333, 1000, 2500, Math.floor(P.N / 2), P.N].filter((k) => k <= P.N);
+  const ks = [1, 2, 3, 4, 7, 15, 42, 100, 333, 1000, 2500, Math.floor(ref.N / 2), ref.N].filter((k) => k <= ref.N);
   for (const k of ks) {
     const jh = await jpost('/api/hint', { t: jNew.t, r: k });
     if (jh.word !== ref.wordAt[k - 1] || jh.r !== k || jh.d !== ref.distOf[k - 1]) {
@@ -120,6 +122,14 @@ for (const L of LANGS) {
     }
   }
   if (!hbad) ok(`/api/hint word+rank+dist identical (${ks.length} ranks)`);
+
+  const jhFirst = await jpost('/api/hint', { t: jNew.t, r: 1 });
+  if (!poolOkRef(L, jhFirst.word)) fail(`/api/hint r=1 returned function/blocked word "${jhFirst.word}"`);
+  else {
+    const wi = P.IDX.get(jhFirst.word);
+    if (wi === undefined || !(P.LVIDX[wi] >= 0 && P.LVIDX[wi] < LV_COUNTS[L])) fail(`/api/hint r=1 returned ungraded word "${jhFirst.word}"`);
+    else ok('secret is a graded, non-function pool word');
+  }
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL REMOTE PARITY CHECKS PASSED');

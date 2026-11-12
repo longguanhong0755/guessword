@@ -7,3 +7,4 @@ build/kaikki-sub.json
 __pycache__/
 *.pyc
 dist/
+lang-data/

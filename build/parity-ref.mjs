@@ -1,9 +1,17 @@
 // build/parity-ref.mjs — shared client-side reference for the parity tests.
-// A verbatim port of js/app.js (decodePack + buildRanks, including the deterministic
-// 1e-6 tie-break jitter). Both test-rank-parity.mjs (local, drives the engine module
-// over site/) and test-rank-parity-remote.mjs (live HTTP, fetches the deployed data)
-// compare against this one implementation, so the evidence is consistent.
+// A verbatim port of js/app.js (decodePack + buildRanks over the rank pool,
+// including the deterministic 1e-6 tie-break jitter). Both test-rank-parity.mjs
+// (local, drives the engine module over site/) and test-rank-parity-remote.mjs
+// (live HTTP, fetches the deployed data) compare against this one
+// implementation, so the evidence is consistent.
+import { isStopWord, isBlocked } from '../functions/api/_pool-stopwords.js';
+
 export const LV_COUNTS = { en: 6, ja: 5, ko: 6, fr: 6, de: 6, es: 6 };
+
+// same predicate as js/app.js poolOk() / functions/api/_engine.js poolOk()
+export function poolOkRef(lang, word) {
+  return !isStopWord(lang, word) && !(lang === 'en' && isBlocked(word));
+}
 
 export function rngRef(seedStr) {
   let h = 1779033703 ^ seedStr.length;
@@ -35,11 +43,13 @@ export function decodePack(meta, vecBytes) {
   return { D: D2, N: N2, WORDS: words, LVIDX: lv, UNIT: unit, IDX: new Map(words.map((w, i) => [w, i])) };
 }
 
-// verbatim buildRanks(): scores = cos + rng(lang|secret|word) * 1e-6, order = score desc, word asc
+// verbatim buildRanks(): scores = cos + rng(lang|secret|word) * 1e-6, then
+// rank within the graded, non-function-word pool (score desc, word asc).
+// Non-pool words are ranked by insertion into that order.
 export function buildRanksRef(P, secretWord, lang) {
   const P_D = P.D, P_N = P.N, P_W = P.WORDS, P_U = P.UNIT;
   const si = P.IDX.get(secretWord);
-  if (si === undefined) return null;
+  if (si === undefined || !P_U) return null;
   const scores = new Float64Array(P_N);
   for (let i = 0; i < P_N; i++) {
     if (i === si) { scores[i] = 2; continue; }
@@ -47,18 +57,36 @@ export function buildRanksRef(P, secretWord, lang) {
     for (let d = 0; d < P_D; d++) dot += P_U[off + d] * P_U[soff + d];
     scores[i] = dot + rngRef(lang + "|" + secretWord + "|" + P_W[i])() * 1e-6;
   }
-  const order = new Array(P_N);
-  for (let i = 0; i < P_N; i++) order[i] = i;
-  order.sort((a, b) => scores[b] - scores[a] || (P_W[a] < P_W[b] ? -1 : 1));
-  const rankOf = new Map(), wordAt = new Array(P_N), distOf = new Array(P_N);
-  const K = 3000 / P_N;
-  let prevDist = 0;
-  for (let r = 0; r < P_N; r++) {
-    const i = order[r];
-    rankOf.set(P_W[i], r + 1);
-    wordAt[r] = P_W[i];
-    const d = Math.max(prevDist + 1, 1 + Math.round(r * K));
-    distOf[r] = d; prevDist = d;
+  const nLv = LV_COUNTS[lang] || 6;
+  const mask = new Uint8Array(P_N), pool = [];
+  for (let i = 0; i < P_N; i++) {
+    const l = P.LVIDX[i];
+    if (l >= 0 && l < nLv && poolOkRef(lang, P_W[i])) { mask[i] = 1; pool.push(i); }
   }
-  return { rankOf, wordAt, distOf, N: P_N, K };
+  const poolN = pool.length;
+  const order = new Array(poolN);
+  for (let k = 0; k < poolN; k++) order[k] = pool[k];
+  order.sort((a, b) => scores[b] - scores[a] || (P_W[a] < P_W[b] ? -1 : (P_W[a] > P_W[b] ? 1 : 0)));
+  const rankOf = new Map(), wordAt = new Array(poolN);
+  for (let k = 0; k < poolN; k++) {
+    const i = order[k];
+    rankOf.set(P_W[i], k + 1);
+    wordAt[k] = P_W[i];
+  }
+  for (let i = 0; i < P_N; i++) {
+    if (mask[i]) continue;
+    const s = scores[i], w = P_W[i];
+    let lo = 0, hi = poolN;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1, j = order[mid];
+      if (scores[j] > s || (scores[j] === s && P_W[j] < w)) lo = mid + 1; else hi = mid;
+    }
+    // rank 1 is reserved for the secret (see js/app.js / _engine.js)
+    rankOf.set(w, w === secretWord ? 1 : Math.max(2, lo + 1));
+  }
+  // a legacy save may carry a secret outside the pool: rank 1 stays unique
+  if (poolN && !mask[si]) { rankOf.set(P_W[order[0]], 2); wordAt[0] = secretWord; }
+  const distOf = new Array(poolN + 1);
+  for (let r = 0; r <= poolN; r++) distOf[r] = r + 1;
+  return { rankOf, wordAt, distOf, N: poolN, poolN, lang, pool, mask };
 }

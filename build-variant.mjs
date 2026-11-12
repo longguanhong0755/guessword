@@ -12,13 +12,14 @@
 // en/ja/ko packs live in js/data-*.js; fr/de/es come from D:/gw-dl/lang/pack-<L>.json + dict-<L>.json.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { compose } from './build/compose.mjs';
 
-const ROOT = 'D:/workspace/guessword';
-const OUT = 'D:/workspace/guessword/site';
-const WRANGLER_TOML = 'D:/workspace/guessword/wrangler.toml';
-const LANGDIR = 'D:/gw-dl/lang';
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const OUT = process.env.GW_OUT || path.join(ROOT, 'site');
+const WRANGLER_TOML = path.join(ROOT, 'wrangler.toml');
+const LANGDIR = process.env.GW_LANGDIR || (fs.existsSync('D:/gw-dl/lang') ? 'D:/gw-dl/lang' : path.join(ROOT, 'lang-data'));
 const VER = 'v20261014b';   // bump on data change to bust immutable caches
 const SECHOST = (process.argv[2] || '').replace(/\/$/, '');
 const CHUNK_BYTES = 900000; // ~0.9MB per chunk

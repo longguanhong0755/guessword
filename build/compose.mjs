@@ -3,12 +3,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const JS_SRC = ['js/data-en.js', 'js/data-extra.js', 'js/data-ja.js', 'js/data-ko.js', 'js/app.js'];
+// _pool-stopwords.js is shared with the online engine (functions/api/_engine.js).
+// It is an ES module there; in the single-file client the `export` keywords are
+// stripped so the same data stays the single source of truth.
+export const JS_SRC = ['functions/api/_pool-stopwords.js', 'js/data-en.js', 'js/data-extra.js', 'js/data-ja.js', 'js/data-ko.js', 'js/app.js'];
 
 export function compose(root) {
   const rd = f => fs.readFileSync(path.join(root, f), 'utf8').replace(/\n$/, '');
   const css = rd('css/app.css');
-  const parts = JS_SRC.map(rd);
+  const parts = JS_SRC.map(f => rd(f).replace(/^export\s+/gm, ''));
   if (parts[parts.length - 1].startsWith('"use strict";\n')) parts[parts.length - 1] = parts[parts.length - 1].slice('"use strict";\n'.length);
   const js = ['"use strict";', ...parts].join('\n');
   const lines = fs.readFileSync(path.join(root, 'index.html'), 'utf8').split('\n');

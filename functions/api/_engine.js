@@ -22,16 +22,17 @@
    ===================================================================== */
 "use strict";
 
+import { isStopWord, isBlocked } from "./_pool-stopwords.js";
+
 export const VER = "__GW_VER__";   // injected by build-variant.mjs; busts asset caches
 
 const LANGS = ["en", "ja", "ko", "fr", "de", "es"];
 const LV_COUNT = { en: 6, ja: 5, ko: 6, fr: 6, de: 6, es: 6 };
 const CHUNK_LIMIT = 64 * 1024 * 1024;      // sanity cap for vec assets
 
-// 谜底必须是玩家能打出来的词；与 js/app.js 的 secretOk 逐字一致（英文的过常用/屏蔽词在下注时被拒绝）
-const STOP_EN = new Set(["the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "must", "can", "i", "you", "he", "she", "it", "we", "they"]);
-const BLOCKED = ["rape", "rapes", "retard", "retards", "nigga", "niggas", "nigger", "niggers", "faggot", "faggots", "negro", "coon", "kike", "spastic"];
-function secretOk(L, w) { return L !== "en" || (!STOP_EN.has(w) && !BLOCKED.some((b) => w.startsWith(b))); }
+// A valid secret/hint is graded and not a closed-class/function word. The
+// browser (js/app.js poolOk) uses exactly the same shared list.
+function poolOk(L, w) { return !isStopWord(L, w) && !(L === "en" && isBlocked(w)); }
 
 /* ---------- byte / json helpers ---------- */
 const te = new TextEncoder(), td = new TextDecoder();
@@ -84,12 +85,6 @@ function decodeUnit(N, D, bytes, min, max) {
   }
   return unit;
 }
-function distTable(N) {
-  const K = 3000 / N, out = new Int32Array(N);
-  let prev = 0;
-  for (let r = 0; r < N; r++) { const d = Math.max(prev + 1, 1 + Math.round(r * K)); out[r] = d; prev = d; }
-  return out;
-}
 
 const STATE = { langs: new Map(), metas: new Map(), buckets: new Map() };  // per-isolate caches
 
@@ -117,7 +112,17 @@ export function createEngine(fetchAsset) {
     const words = meta.words.split("|");
     const lv = new Uint8Array(meta.level.length);
     for (let i = 0; i < lv.length; i++) lv[i] = +meta.level[i];
-    const st = { L, N: meta.N, D: meta.D, WORDS: words, LVIDX: lv, chunks: meta.chunks, min: meta.min, max: meta.max };
+    // Rank pool: graded vocabulary only (level 9 is ungraded) minus function
+    // words. Non-pool words remain guessable and are ranked relative to it.
+    const mask = new Uint8Array(meta.N), pidx = [];
+    for (let i = 0; i < meta.N; i++) {
+      const level = lv[i];
+      if (level >= 0 && level < LV_COUNT[L] && poolOk(L, words[i])) { mask[i] = 1; pidx.push(i); }
+    }
+    const st = {
+      L, N: meta.N, D: meta.D, WORDS: words, LVIDX: lv, chunks: meta.chunks, min: meta.min, max: meta.max,
+      POOL_MASK: mask, POOL: Int32Array.from(pidx), POOL_N: pidx.length,
+    };
     metas.set(L, st);
     evict();
     return st;
@@ -139,7 +144,7 @@ export function createEngine(fetchAsset) {
       const st = {
         L, N: M.N, D: M.D, WORDS: M.WORDS, LVIDX: M.LVIDX,
         UNIT: decodeUnit(M.N, M.D, vec, M.min, M.max),
-        DIST: distTable(M.N),
+        POOL_MASK: M.POOL_MASK, POOL: M.POOL, POOL_N: M.POOL_N,
         IDX: new Map(M.WORDS.map((w, i) => [w, i])),
       };
       langs.set(L, st);
@@ -167,23 +172,24 @@ export function createEngine(fetchAsset) {
 
   function cmpIdx(scores, W) { return (a, b) => scores[b] - scores[a] || (W[a] < W[b] ? -1 : (W[a] > W[b] ? 1 : 0)); }
 
-  // 1-based rank of word index wi in the (score desc, word asc) order
+  // 1-based rank of word index wi among the rank pool (score desc, word asc).
+  // Non-pool words are ranked by insertion: 1 + pool words that score above,
+  // floored at 2 so rank 1 always means "this is the secret".
   function rankAt(P, scores, wi) {
-    const sg = scores[wi], W = P.WORDS;
+    const sg = scores[wi], W = P.WORDS, POOL = P.POOL, PN = P.POOL_N;
     let r = 1;
-    for (let i = 0; i < P.N; i++) {
-      const s = scores[i];
+    for (let k = 0; k < PN; k++) {
+      const i = POOL[k], s = scores[i];
       if (s > sg) r++;
       else if (s === sg && W[i] < W[wi]) r++;
     }
-    return r;
+    return r < 2 ? 2 : r;
   }
 
-  // word index sitting at 1-based rank k
+  // word index sitting at 1-based pool rank k
   function indexAtRank(P, scores, k) {
-    const N = P.N, W = P.WORDS;
-    const idx = new Int32Array(N);
-    for (let i = 0; i < N; i++) idx[i] = i;
+    const N = P.POOL_N, W = P.WORDS;
+    const idx = P.POOL.slice();
     const cmp = cmpIdx(scores, W);
     let lo = 0, hi = N - 1, target = k - 1;
     while (lo < hi) {
@@ -282,7 +288,7 @@ export async function handle(context, kind) {
       if (daily) { lo = 0; hi = LV_COUNT[b.lang] - 1; }
       const M = await eng.loadMeta(b.lang);   // word list only: picking a secret needs no vectors
       const pool = [];
-      for (let i = 0; i < M.N; i++) if (M.LVIDX[i] >= lo && M.LVIDX[i] <= hi && secretOk(b.lang, M.WORDS[i])) pool.push(i);
+      for (let i = 0; i < M.N; i++) if (M.LVIDX[i] >= lo && M.LVIDX[i] <= hi && M.POOL_MASK[i]) pool.push(i);
       if (!pool.length) return J({ err: "empty pool" }, 400);
       let si;
       if (daily) {
@@ -295,7 +301,8 @@ export async function handle(context, kind) {
       }
       const t = await makeToken(key, { l: b.lang, lo, hi, s: M.WORDS[si], i: Date.now() });
       if (!t) return J({ err: "token" }, 500);
-      return J({ t, pool: pool.length });
+      // n = global rank-pool size (hint/bar scale); pool = this game's level range
+      return J({ t, pool: pool.length, n: M.POOL_N });
     }
 
     if (kind === "warm") {
@@ -305,7 +312,7 @@ export async function handle(context, kind) {
       const b = await body(request);
       if (!b || !LANGS.includes(b.lang)) return J({ err: "bad request" }, 400);
       const P = await eng.loadLang(b.lang);
-      return J({ ok: true, n: P.N, vectors: true });
+      return J({ ok: true, n: P.N, rn: P.POOL_N, vectors: true });
     }
 
     if (kind === "guess") {
@@ -323,9 +330,9 @@ export async function handle(context, kind) {
         const wi = P.IDX.get(w);
         if (wi === undefined) return null;
         const r = wi === si ? 1 : eng.rankAt(P, scores, wi);
-        return { r, d: P.DIST[r - 1] };
+        return { r, d: r };
       });
-      return J({ items });
+      return J({ items, n: P.POOL_N });
     }
 
     if (kind === "hint") {
@@ -337,11 +344,11 @@ export async function handle(context, kind) {
       const si = P.IDX.get(p.s);
       if (si === undefined) return J({ err: "secret gone" }, 500);
       let r = b.r | 0;
-      if (!(r >= 1 && r <= P.N)) return J({ err: "bad rank" }, 400);
+      if (!(r >= 1 && r <= P.POOL_N)) return J({ err: "bad rank" }, 400);
       const scores = eng.scorePass(P, si, p.s);
       const wi = r === 1 ? si : eng.indexAtRank(P, scores, r);
       const rr = wi === si ? 1 : eng.rankAt(P, scores, wi);
-      return J({ word: P.WORDS[wi], r: rr, d: P.DIST[rr - 1] });
+      return J({ word: P.WORDS[wi], r: rr, d: rr, n: P.POOL_N });
     }
 
     if (kind === "def") {
