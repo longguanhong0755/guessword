@@ -102,20 +102,29 @@ function getPack(lang){
   annotatePool(P, lang);
   return packCache[lang] = P;
 }
-// Rank pool = graded vocabulary (levels 0..N-1; the ungraded level 9 bucket is
-// excluded) minus closed-class/function words. Non-pool words stay guessable
-// and are ranked relative to the pool, so a good synonym in level 9 still
-// scores near the top without ever being picked as a hint or secret.
+// Two sets over the same pack:
+//   POOL  = graded vocabulary (levels 0..N-1; level 9 is ungraded) minus
+//           function words. Only pool words can be secrets or hints.
+//   LEGAL = every guessable non-function word, level 9 included. Displayed
+//           ranks are a single total order over LEGAL, so each word has one
+//           unique number and a good level-9 synonym can sit next to the top.
 function annotatePool(P, lang){
   const nLv = (LANGS[lang] || LANGS.en).levels.length;
-  const mask = new Uint8Array(P.N), idx = [];
+  const pmask = new Uint8Array(P.N), pidx = [];
+  const lmask = new Uint8Array(P.N), lidx = [];
   for(let i=0;i<P.N;i++){
+    const w = P.WORDS[i];
+    if(!poolOk(w, lang)) continue;
+    lmask[i] = 1; lidx.push(i);
     const l = P.LVIDX[i];
-    if(l >= 0 && l < nLv && poolOk(P.WORDS[i], lang)){ mask[i] = 1; idx.push(i); }
+    if(l >= 0 && l < nLv){ pmask[i] = 1; pidx.push(i); }
   }
-  P.POOL_MASK = mask;
-  P.POOL = new Int32Array(idx);
-  P.POOL_N = idx.length;
+  P.POOL_MASK = pmask;
+  P.POOL = new Int32Array(pidx);
+  P.POOL_N = pidx.length;
+  P.LEGAL_MASK = lmask;
+  P.LEGAL = new Int32Array(lidx);
+  P.LEGAL_N = lidx.length;
   return P;
 }
 function packAvailable(lang){ try{ return !!(PACK_SRC[lang] && PACK_SRC[lang]()); }catch(e){ return false; } }
@@ -144,7 +153,7 @@ function activateLang(lang){
 const $ = id => document.getElementById(id);
 const coarsePtr = !!(window.matchMedia && window.matchMedia("(pointer:coarse)").matches);
 const LSKEY = "guessword-v2";
-const MODEL_VER = "nb1908c";   // embedding + ranking-scheme tag (c = pool-rank distances)
+const MODEL_VER = "nb1908d";   // embedding + ranking-scheme tag (d = legal total-order ranks)
 let store = { settings:{theme:"dark", sound:true}, history:[], recent:[], games:[], notebook:[], daily:{} };
 try{ const raw = localStorage.getItem(LSKEY); if(raw){ store = Object.assign(store, JSON.parse(raw)); } }catch(e){}
 if(!Array.isArray(store.notebook)) store.notebook = [];
@@ -184,7 +193,7 @@ function rng(seedStr){
 }
 
 /* ---------- ranking by cosine similarity ---------- */
-const rankCache = {};
+const rankCache = {}, rankCacheKeys = [];
 function buildRanks(secretWord, lang){
   lang = lang || LANG;
   const key = lang + "|" + secretWord;
@@ -193,7 +202,9 @@ function buildRanks(secretWord, lang){
   if(!P) return null;
   const P_IDX = P.IDX, P_N = P.N, P_D = P.D, P_W = P.WORDS, P_U = P.UNIT;
   const si = P_IDX.get(secretWord);
-  if(si === undefined || !P_U) return null;
+  // a legacy save whose secret is now a function word has no place in the
+  // total order; callers restart instead of mixing the old scale in
+  if(si === undefined || !P_U || !P.LEGAL_MASK[si]) return null;
   const scores = new Float64Array(P_N);
   for(let i=0;i<P_N;i++){
     if(i===si){ scores[i] = 2; continue; }
@@ -201,38 +212,32 @@ function buildRanks(secretWord, lang){
     for(let d=0;d<P_D;d++) dot += P_U[off+d]*P_U[soff+d];
     scores[i] = dot + rng(lang+"|"+secretWord+"|"+P_W[i])()*1e-6;
   }
-  const poolN = P.POOL_N, pool = P.POOL;
-  const order = new Array(poolN);
-  for(let k=0;k<poolN;k++) order[k] = pool[k];
+  // one total order over every legal guess (score desc, word asc); the secret
+  // is pinned to score 2.0, so it is rank 1 without any special case
+  const legalN = P.LEGAL_N, legal = P.LEGAL;
+  const order = new Array(legalN);
+  for(let k=0;k<legalN;k++) order[k] = legal[k];
   order.sort((a,b)=> scores[b]-scores[a] || (P_W[a]<P_W[b]?-1:(P_W[a]>P_W[b]?1:0)));
-  const rankOf = new Map(), wordAt = new Array(poolN);
-  for(let k=0;k<poolN;k++){
-    const i = order[k];
-    rankOf.set(P_W[i], k+1);
-    wordAt[k] = P_W[i];
+  const rankOf = new Map(), wordAt = new Array(legalN);
+  const poolRankOf = new Map(), poolWordAt = new Array(P.POOL_N);
+  let poolSeen = 0;
+  for(let k=0;k<legalN;k++){
+    const i = order[k], w = P_W[i];
+    rankOf.set(w, k+1);
+    wordAt[k] = w;
+    // hint-targeting coordinate: a pool word's pool ordinal, or the bucket
+    // number for any other word (1 + #pool words above). Never displayed.
+    poolRankOf.set(w, poolSeen+1);
+    if(P.POOL_MASK[i]) poolWordAt[poolSeen++] = w;
   }
-  // Non-pool words (ungraded level 9, function words) are ranked by insertion
-  // into the pool order: 1 + number of pool words that score above them.
-  for(let i=0;i<P_N;i++){
-    if(P.POOL_MASK[i]) continue;
-    const s = scores[i], w = P_W[i];
-    let lo = 0, hi = poolN;
-    while(lo < hi){
-      const mid = (lo+hi) >> 1, j = order[mid];
-      if(scores[j] > s || (scores[j] === s && P_W[j] < w)) lo = mid+1; else hi = mid;
-    }
-    // rank 1 is reserved for the secret: a non-pool word that outscores every
-    // pool word (e.g. an ungraded inflected form) must not look like a win
-    rankOf.set(w, w === secretWord ? 1 : Math.max(2, lo+1));
-  }
-  // a legacy save may carry a secret that is not in the pool: it still owns
-  // rank 1, so demote the top pool word to keep rank 1 unique
-  if(poolN && !P.POOL_MASK[si]){ rankOf.set(P_W[order[0]], 2); wordAt[0] = secretWord; }
-  // distance is the pool rank itself (1 = secret); one extra slot covers a
-  // non-pool guess ranked just below the last pool word
-  const distOf = new Array(poolN+1);
-  for(let r=0;r<=poolN;r++) distOf[r] = r+1;
-  return rankCache[key] = { rankOf, wordAt, distOf, N:poolN, poolN, lang };
+  // distance is the legal rank itself (1 = secret)
+  const distOf = new Array(legalN);
+  for(let r=0;r<legalN;r++) distOf[r] = r+1;
+  const val = { rankOf, wordAt, distOf, N:legalN, poolN:P.POOL_N, poolRankOf, poolWordAt, lang };
+  rankCache[key] = val;
+  rankCacheKeys.push(key);
+  while(rankCacheKeys.length > 8) delete rankCache[rankCacheKeys.shift()];
+  return val;
 }
 
 /* ---------- puzzle pools: selected level + the one below ---------- */
@@ -282,8 +287,10 @@ function persistCurrent(){
   if(!cfg || state !== "ongoing") return;
   if(REMOTE && !gameToken) return;   // /api/new still in flight: nothing to save yet
   const rec = { gid: cfg.gid, lo: cfg.lo, hi: cfg.hi, lang: cfg.lang || LANG, state,
-                board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null), n:(e.n||null) })),
+                board: board.map(e => ({ word:e.word, isHint:e.isHint, r:(e.r!=null?e.r:null), d:(e.d!=null?e.d:null),
+                                         pr:(e.pr!=null?e.pr:null), n:(e.n||null) })),
                 rn: (ranks && ranks.N) || null,
+                mv: MODEL_VER,
                 at: Date.now() };
   if(cfg.daily) rec.daily = cfg.daily;
   if(REMOTE) rec.token = gameToken; else rec.secret = secret;
@@ -328,25 +335,44 @@ function validateGuess(raw){
   if(LANG==="en" && isBlocked(w)) return {valid:false, reason:"disallowed"};
   if(board.some(e => e.word === w)) return {valid:false, reason:"duplicate", word:w};
   if(isStopWord(LANG, w)) return {valid:false, reason:"too-common"};
-  return {valid:true, word:foldWord(w)};
+  const fw = foldWord(w);
+  // folding can land on a function word ("others" -> "other"); it has no rank
+  // in LEGAL, so reject it with the same message as an unfurled function word
+  if(fw && LANG==="en" && isBlocked(fw)) return {valid:false, reason:"disallowed"};
+  const P = getPack(LANG);
+  if(fw && P && P.IDX.has(fw) && !P.LEGAL_MASK[P.IDX.get(fw)]) return {valid:false, reason:"too-common"};
+  return {valid:true, word:fw};
 }
 function foldWord(w){
   if(IDX.has(w)) return w;
   return LEMMA.get(w) || null;
 }
 
-/* ---------- hint target (nearest unused rank closer than best) ---------- */
-function boardRanks(){ return board.map(e => e.r).filter(x => x != null); }
+/* ---------- hint target (nearest unused pool ordinal closer than best) ---------- */
+// Hints are aimed in POOL coordinates (pr), not the displayed legal rank r.
+// Only a guessed *pool* word consumes a pool slot; a level-9 guess may share
+// a bucket number with a pool word and must not hide that hint.
+function boardPoolRanks(){ return board.map(e => e.pr).filter(x => x != null); }
 function pickHintRank(giveUp){
-  const n = (ranks && ranks.N) || poolSize();
-  const rs = boardRanks();
-  const used = new Set(rs);
+  const n = hintPoolSize();
+  const rs = boardPoolRanks();
+  const used = new Set();
+  const P = getPack(LANG);
+  for(const e of board){
+    if(e.pr == null) continue;
+    if(!P){ used.add(e.pr); continue; }
+    const wi = e.word != null ? P.IDX.get(e.word) : undefined;
+    if(wi !== undefined && P.POOL_MASK[wi]) used.add(e.pr);
+  }
   if(giveUp) return 1;
   if(n <= 1) return 1;
   const best = rs.length ? Math.min(...rs) : null;
   // first hint: land in the top ~5% of the pool (a real clue, not a needle)
   if(best === null) return Math.max(2, Math.min(n, Math.round(n*0.05)));
   if(best <= 20){
+    // a non-pool guess shares a bucket number without consuming that pool slot;
+    // give the pool word at the same position instead of skipping past it
+    if(best >= 2 && !used.has(best)) return best;
     for(let x=best-1; x>=2; x--) if(!used.has(x)) return x;
     for(let x=best+1; x<=20; x++) if(!used.has(x)) return x;
     for(let x=21; x<=n; x++) if(!used.has(x)) return x;
@@ -411,19 +437,23 @@ const IC = {
 };
 
 /* ---------- rendering ---------- */
-// Pool size of a language, used to normalize the bar/curve when no live game
-// ranks object is available (history, share card, language switch).
-function poolSize(lang){
+// Display scale = LEGAL_N: the bar/curve/history normalize against the same
+// total order the row numbers use. Hint targeting uses the smaller POOL.
+function rankScaleSize(lang){
+  try{ const P = getPack(lang || LANG); if(P && P.LEGAL_N) return P.LEGAL_N; }catch(e){}
+  return N || 3000;
+}
+function hintPoolSize(lang){
   try{ const P = getPack(lang || LANG); if(P && P.POOL_N) return P.POOL_N; }catch(e){}
   return 3000;
 }
 function barWidth(d, n){
-  n = n || (ranks && ranks.N) || poolSize();
+  n = n || (ranks && ranks.N) || rankScaleSize();
   const p = Math.min(Math.max((d-1)/Math.max(1, n), 0), 1);
   return 100*(0.01 + 0.99*Math.pow(1-p, 3.5));
 }
 function barColor(d, n){
-  n = n || (ranks && ranks.N) || poolSize();
+  n = n || (ranks && ranks.N) || rankScaleSize();
   return d <= Math.max(10, n*0.02) ? "green" : d <= Math.max(50, n*0.10) ? "orange" : "red";
 }
 function rowHTML(e, withMarker){
@@ -534,7 +564,7 @@ async function submitGuess(raw){
   busy = true;
   result = {type:"loading"};
   renderInputRow(); renderResultArea();
-  let r, d;
+  let r, d, pr;
   if(REMOTE){
     if(!gameToken && !(await ensureToken())){
       busy = false;
@@ -545,7 +575,7 @@ async function submitGuess(raw){
     try{
       const j = await apiPost("/guess", { t: gameToken, words:[word] });
       it = j.items && j.items[0];
-      if(j.n && ranks) ranks.N = j.n;   // keep the pool scale in sync after a resume/migration
+      if(j.n && ranks) ranks.N = j.n;   // keep the legal scale in sync after a resume/migration
     }catch(e){
       busy = false;
       result = {type:"error", msg:"网络异常,请重试"};
@@ -556,15 +586,21 @@ async function submitGuess(raw){
       result = {type:"error", msg:"抱歉,词表里没有这个词"};
       sfx.notfound(); renderResultArea(); return false;
     }
-    r = it.r; d = it.d;
+    r = it.r; d = it.d; pr = it.pr;
     if(r === 1) secret = word;   // guessed the secret — the only way to learn it before the end
   } else {
     await new Promise(res => setTimeout(res, 180 + Math.random()*140));
     r = ranks.rankOf.get(word);
+    if(r == null){
+      busy = false;
+      result = {type:"error", msg:"这个词不计入名次,换一个试试"};
+      sfx.error(); renderResultArea(); return false;
+    }
     d = ranks.distOf[r-1];
+    pr = ranks.poolRankOf.get(word);
   }
   busy = false;
-  applyEntry({word, r, d, distance:d, isHint:false});
+  applyEntry({word, r, d, distance:d, isHint:false, pr});
   return true;
 }
 async function requestHint(giveUp){
@@ -583,11 +619,11 @@ async function requestHint(giveUp){
     result = {type:"error", msg:"获取提示失败,请重试"};
     sfx.error(); renderResultArea(); return;
   }
-  let word, d, r;
+  let word, d, r, pr;
   if(REMOTE){
     try{
-      const j = await apiPost("/hint", { t: gameToken, r: tr });
-      word = j.word; d = j.d; r = j.r || tr;
+      const j = await apiPost("/hint", { t: gameToken, pr: tr });
+      word = j.word; d = j.d; r = j.r || tr; pr = j.pr || tr;
       if(j.n && ranks) ranks.N = j.n;
     }catch(e){
       busy = false;
@@ -597,10 +633,16 @@ async function requestHint(giveUp){
     if(giveUp) secret = word;   // revealed by the rank-1 hint
   } else {
     await new Promise(res => setTimeout(res, 240));
-    word = ranks.wordAt[tr-1]; d = ranks.distOf[tr-1]; r = tr;
+    word = ranks.poolWordAt[tr-1];
+    if(word == null){
+      busy = false;
+      result = {type:"error", msg:"获取提示失败,请重试"};
+      sfx.error(); renderResultArea(); return;
+    }
+    r = ranks.rankOf.get(word); d = ranks.distOf[r-1]; pr = tr;
   }
   busy = false;
-  applyEntry({word, r, d, distance:d, isHint:true, force:giveUp});
+  applyEntry({word, r, d, distance:d, isHint:true, force:giveUp, pr});
 }
 function clearResult(){ result = null; marker = null; renderResultArea(); }
 
@@ -651,7 +693,7 @@ function curvePts(){
 function rankCurveSVG(){
   const pts = curvePts();
   if(!pts.length) return "";
-  const NMAX = Math.max(2, (ranks && ranks.N) || poolSize());
+  const NMAX = Math.max(2, (ranks && ranks.N) || rankScaleSize());
   const H = 200, PL = 62, PR = 16, PT = 14, PB = 24;
   const endN = pts[pts.length-1].n;
   const span = Math.max(1, endN - 1);
@@ -660,10 +702,16 @@ function rankCurveSVG(){
   const hitR = dense ? 11 : 15;
   const xs = n => pts.length <= 1 ? (PL + W - PR) / 2 : PL + (n-1)/span * (W - PL - PR);
   const ys = r => PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (H - PT - PB);
-  const ticks = [1, 10, 100, 1000].filter(t => t < NMAX).concat([NMAX]);
+  const maxY = ys(NMAX);
+  const ticks = [1, 10, 100, 1000, 10000].filter(t => t < NMAX);
+  // if a normal tick sits close to NMAX, put the NMAX label at the right end of
+  // its grid line so the two 15px labels cannot overlap in the narrow chart
+  const maxOnRight = ticks.some(t => maxY - ys(t) < 24);
   const grid = ticks.map(t =>
     `<line class="rcGrid" x1="${PL}" y1="${ys(t).toFixed(1)}" x2="${W-PR}" y2="${ys(t).toFixed(1)}"/>` +
-    `<text class="rcTick" x="${PL-8}" y="${(ys(t) + (t===NMAX ? -5 : 3.5)).toFixed(1)}">${fmt(t)}</text>`).join("");
+    `<text class="rcTick" x="${PL-8}" y="${(ys(t) + 3.5).toFixed(1)}">${fmt(t)}</text>`).join("") +
+    `<line class="rcGrid" x1="${PL}" y1="${maxY.toFixed(1)}" x2="${W-PR}" y2="${maxY.toFixed(1)}"/>` +
+    `<text class="rcTick" x="${maxOnRight ? W-PR : PL-8}" y="${(maxY - 5).toFixed(1)}">${fmt(NMAX)}</text>`;
   const line = pts.length > 1
     ? `<polyline class="rcLine" points="${pts.map(p => xs(p.n).toFixed(1)+","+ys(p.r).toFixed(1)).join(" ")}"/>` : "";
   const hits = pts.map(p =>
@@ -1032,9 +1080,9 @@ function histGameRows(g){
   if(g.secret){
     try{ const rg = buildRanks(g.secret, gl); if(rg){ dOf = rg.distOf; rOf = rg.rankOf; rgN = rg.N; } }catch(e){}
   }
-  // recomputed ranks live on the current pool scale; only fall back to the
-  // size stored with the game (or today's pool) when vectors are unavailable
-  const pn = rgN || g.n || poolSize(gl);
+  // recomputed ranks live on the current LEGAL scale; only fall back to the
+  // size stored with the game (or today's pack) when vectors are unavailable
+  const pn = rgN || g.n || rankScaleSize(gl);
   const distOf = e => {
     if(rOf){ const r = rOf.get(e.word); if(r) return dOf[r-1]; }  // offline: recompute in the current pool
     if(e.distance) return e.distance;                              // finished games store the distance
@@ -1448,28 +1496,52 @@ async function startGame(lo, hi, resumeGid, dailyDate){
       if(g.token && REMOTE){
         busy = true;
         const savedN = g.rn || 0;
-        ranks = { N: savedN || N, remote:true };
+        let curN = 0;
+        try{ const P = getPack(LANG); curN = (P && P.LEGAL_N) || 0; }catch(e){}
+        ranks = { N: savedN || curN || N, remote:true };
         gameToken = g.token;
-        board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, n:e.n, distance:e.d }));
-        // old saves have no pool size and carry full-pack ranks: refetch them once
-        if(!savedN || board.some(e => e.r == null || e.d == null)){
+        board = (g.board||[]).map(e => ({ word:e.word, isHint:!!e.isHint, r:e.r, d:e.d, pr:e.pr, n:e.n, distance:e.d }));
+        // migration: a pre-total-order save (rn = 8,357 and no mv) or any save
+        // whose scale no longer matches the current LEGAL_N must be recomputed,
+        // otherwise old ranks and new hints/charts would mix two scales
+        const stale = !savedN || !g.mv || g.mv !== MODEL_VER || (curN && savedN !== curN)
+                      || board.some(e => e.r == null || e.d == null || e.pr == null);
+        if(stale){
           try{
             const j = await apiPost("/guess", { t: gameToken, words: board.map(e => e.word) });
             if(j.n) ranks.N = j.n;
             board = (j.items || []).map((it, i) => {   // the API answers in request order
               const e = board[i];
-              return it ? { ...e, r:it.r, d:it.d, distance:it.d } : e;
-            }).filter(e => e.d != null);
-          }catch(err){ toast("存档恢复失败,请重试"); ready = false; }
+              return it ? { ...e, r:it.r, d:it.d, pr:it.pr, distance:it.d } : null;
+            }).filter(e => e && e.d != null);
+            persistCurrent();                          // freeze the migrated ranks in the save
+          }catch(err){
+            // a token whose secret is no longer in the word list cannot be
+            // ranked at all: drop it instead of failing on every resume
+            if(err && err.http === 500){
+              store.games = store.games.filter(x => x.gid !== g.gid); save();
+              toast("该存档已过期,已移除");
+            } else toast("存档恢复失败,请重试");
+            ready = false;
+          }
         }
       } else if(g.secret){
         if(REMOTE) await fallbackToLocal();     // a local-mode save needs the vector pack
         secret = g.secret;
         ranks = buildRanks(secret);
-        board = (g.board||[]).filter(e => IDX.has(e.word)).map(e => {
-          const r = ranks.rankOf.get(e.word);
-          return { word:e.word, isHint:!!e.isHint, r, d: ranks.distOf[r-1], n: e.n, distance: ranks.distOf[r-1] };
-        });
+        if(!ranks){
+          // legacy secret outside the legal total order: no way to rank it
+          toast("该存档无法继续,已移除");
+          store.games = store.games.filter(x => x.gid !== g.gid); save();
+          ready = false;
+        } else {
+          board = (g.board||[]).map(e => {
+            const r = ranks.rankOf.get(e.word);
+            if(r == null) return null;            // old function-word guess: no rank
+            const d = ranks.distOf[r-1];
+            return { word:e.word, isHint:!!e.isHint, r, d, pr: ranks.poolRankOf.get(e.word), n:e.n, distance:d };
+          }).filter(Boolean);
+        }
       } else {
         toast("该存档无法继续,已移除");
         store.games = store.games.filter(x => x.gid !== g.gid); save();
@@ -1623,11 +1695,13 @@ function buildShareCard(){
   rr(bx, by, bw, bh, 16); x.fill(); x.stroke();
   if(pts.length){
     const PL = 76, PR = 26, PT = 28, PB = 46;
-    const NMAX = Math.max(2, (ranks && ranks.N) || poolSize());
+    const NMAX = Math.max(2, (ranks && ranks.N) || rankScaleSize());
     const endN = pts[pts.length-1].n, span = Math.max(1, endN - 1);
     const xs = n => pts.length <= 1 ? bx + (PL + bw - PR) / 2 : bx + PL + (n-1)/span * (bw - PL - PR);
     const ys = r => by + PT + (Math.log(Math.max(1, Math.min(NMAX, r))) / Math.log(NMAX)) * (bh - PT - PB);
-    const ticks = [1, 10, 100, 1000].filter(t => t < NMAX).concat([NMAX]);
+    const ticks = [1, 10, 100, 1000, 10000]
+      .filter(t => t < NMAX && ys(NMAX) - ys(t) >= 15)   // avoid a label collision with NMAX
+      .concat([NMAX]);
     x.setLineDash([6, 8]); x.lineWidth = 1.5;
     for(const t of ticks){
       const yy = ys(t);
@@ -1778,9 +1852,11 @@ window.__gw = {
   remote: () => REMOTE,
   rankOf: w => ranks && ranks.rankOf ? ranks.rankOf.get(w) : undefined,
   distOf: r => ranks && ranks.distOf ? ranks.distOf[r-1] : undefined,
+  poolRankOf: w => ranks && ranks.poolRankOf ? ranks.poolRankOf.get(w) : undefined,
   sampleWords: k => { const out = [], step = Math.max(1, Math.floor(N/k)); for(let i=0;i<N && out.length<k;i+=step) out.push([WORDS[i], LVIDX[i]]); return out; },
   daily: (lang, date) => dailyWordFor(date || dailyStr(), lang || LANG),
-  info: () => ({N, levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length)}),
+  info: () => { const P = getPack(LANG); return { N, poolN: P ? P.POOL_N : null, legalN: P ? P.LEGAL_N : null,
+                                                   levels: LEVELS.map((L,i)=>L+":"+poolFor(i).length) }; },
   setRange: (lo, hi) => { selLo = lo; selHi = hi; lvNext = "lo"; renderLvSel(); return {lo:selLo, hi:selHi}; },
   getRange: () => ({lo: selLo, hi: selHi, n: lvN()})
 };

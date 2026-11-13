@@ -11,10 +11,13 @@
    identical to the offline build (verified by test/test-rank-parity.mjs).
 
    Routes (wired by sibling files new.js / guess.js / hint.js / def.js):
-     POST /api/new    {lang, lo, hi, recent[]}  -> {t: token}
-     POST /api/guess  {t, words[]}              -> {items: [{r, d} | null]}
-     POST /api/hint   {t, r}                    -> {word, d}
+     POST /api/new    {lang, lo, hi, recent[]}  -> {t, pool, n: LEGAL_N}
+     POST /api/guess  {t, words[]}              -> {items: [{r, pr, d} | null], n: LEGAL_N}
+     POST /api/hint   {t, pr}                   -> {word, r, pr, d, n: LEGAL_N}
      GET  /api/def    ?lang=&word=              -> {entry | null}
+   r is the displayed legal total-order rank; pr is the pool ordinal used to
+   pick hints. For compatibility an old client may send `r` to /api/hint and
+   it is interpreted as pr.
 
    The token carries the secret encrypted (AES-GCM), so the answer never
    reaches the browser before the game ends, and no server-side session
@@ -112,16 +115,23 @@ export function createEngine(fetchAsset) {
     const words = meta.words.split("|");
     const lv = new Uint8Array(meta.level.length);
     for (let i = 0; i < lv.length; i++) lv[i] = +meta.level[i];
-    // Rank pool: graded vocabulary only (level 9 is ungraded) minus function
-    // words. Non-pool words remain guessable and are ranked relative to it.
-    const mask = new Uint8Array(meta.N), pidx = [];
+    // POOL: graded vocabulary (level 9 is ungraded) minus function words. Only
+    // pool words can be secrets or hints. LEGAL: every guessable non-function
+    // word, level 9 included; it is the single total order used for displayed
+    // ranks. (en: POOL 8,357 / LEGAL 21,155 of 21,376.)
+    const pmask = new Uint8Array(meta.N), pidx = [];
+    const lmask = new Uint8Array(meta.N), lidx = [];
     for (let i = 0; i < meta.N; i++) {
+      const w = words[i];
+      if (!poolOk(L, w)) continue;
+      lmask[i] = 1; lidx.push(i);
       const level = lv[i];
-      if (level >= 0 && level < LV_COUNT[L] && poolOk(L, words[i])) { mask[i] = 1; pidx.push(i); }
+      if (level >= 0 && level < LV_COUNT[L]) { pmask[i] = 1; pidx.push(i); }
     }
     const st = {
       L, N: meta.N, D: meta.D, WORDS: words, LVIDX: lv, chunks: meta.chunks, min: meta.min, max: meta.max,
-      POOL_MASK: mask, POOL: Int32Array.from(pidx), POOL_N: pidx.length,
+      POOL_MASK: pmask, POOL: Int32Array.from(pidx), POOL_N: pidx.length,
+      LEGAL_MASK: lmask, LEGAL: Int32Array.from(lidx), LEGAL_N: lidx.length,
     };
     metas.set(L, st);
     evict();
@@ -145,6 +155,7 @@ export function createEngine(fetchAsset) {
         L, N: M.N, D: M.D, WORDS: M.WORDS, LVIDX: M.LVIDX,
         UNIT: decodeUnit(M.N, M.D, vec, M.min, M.max),
         POOL_MASK: M.POOL_MASK, POOL: M.POOL, POOL_N: M.POOL_N,
+        LEGAL_MASK: M.LEGAL_MASK, LEGAL: M.LEGAL, LEGAL_N: M.LEGAL_N,
         IDX: new Map(M.WORDS.map((w, i) => [w, i])),
       };
       langs.set(L, st);
@@ -172,21 +183,34 @@ export function createEngine(fetchAsset) {
 
   function cmpIdx(scores, W) { return (a, b) => scores[b] - scores[a] || (W[a] < W[b] ? -1 : (W[a] > W[b] ? 1 : 0)); }
 
-  // 1-based rank of word index wi among the rank pool (score desc, word asc).
-  // Non-pool words are ranked by insertion: 1 + pool words that score above,
-  // floored at 2 so rank 1 always means "this is the secret".
+  // 1-based rank of word index wi in the single LEGAL total order (score desc,
+  // word asc). Every legal word has a unique rank in 1..LEGAL_N; rank 1 is the
+  // secret (its score is pinned to 2.0). Null for function/blocked words.
   function rankAt(P, scores, wi) {
+    if (wi === undefined || !P.LEGAL_MASK[wi]) return null;
+    const sg = scores[wi], W = P.WORDS, LEGAL = P.LEGAL, LN = P.LEGAL_N;
+    let r = 1;
+    for (let k = 0; k < LN; k++) {
+      const i = LEGAL[k], s = scores[i];
+      if (s > sg || (s === sg && W[i] < W[wi])) r++;
+    }
+    return r;
+  }
+
+  // 1-based pool ordinal/bucket of wi: for a pool word its position in POOL,
+  // for any other word 1 + #pool words above it. This is a hint-targeting
+  // coordinate only; it is not displayed and is not a total order.
+  function poolRankAt(P, scores, wi) {
     const sg = scores[wi], W = P.WORDS, POOL = P.POOL, PN = P.POOL_N;
     let r = 1;
     for (let k = 0; k < PN; k++) {
       const i = POOL[k], s = scores[i];
-      if (s > sg) r++;
-      else if (s === sg && W[i] < W[wi]) r++;
+      if (s > sg || (s === sg && W[i] < W[wi])) r++;
     }
-    return r < 2 ? 2 : r;
+    return r;
   }
 
-  // word index sitting at 1-based pool rank k
+  // word index sitting at 1-based pool rank k (hints stay on the graded pool)
   function indexAtRank(P, scores, k) {
     const N = P.POOL_N, W = P.WORDS;
     const idx = P.POOL.slice();
@@ -219,7 +243,7 @@ export function createEngine(fetchAsset) {
     return bucket[word] || null;
   }
 
-  return { loadMeta, loadLang, scorePass, rankAt, indexAtRank, dictEntry, langs, metas };
+  return { loadMeta, loadLang, scorePass, rankAt, poolRankAt, indexAtRank, dictEntry, langs, metas };
 }
 
 function fnv1a(s) {
@@ -301,8 +325,8 @@ export async function handle(context, kind) {
       }
       const t = await makeToken(key, { l: b.lang, lo, hi, s: M.WORDS[si], i: Date.now() });
       if (!t) return J({ err: "token" }, 500);
-      // n = global rank-pool size (hint/bar scale); pool = this game's level range
-      return J({ t, pool: pool.length, n: M.POOL_N });
+      // n = LEGAL total-order size (display/chart scale); pool = this game's level range
+      return J({ t, pool: pool.length, n: M.LEGAL_N });
     }
 
     if (kind === "warm") {
@@ -312,7 +336,7 @@ export async function handle(context, kind) {
       const b = await body(request);
       if (!b || !LANGS.includes(b.lang)) return J({ err: "bad request" }, 400);
       const P = await eng.loadLang(b.lang);
-      return J({ ok: true, n: P.N, rn: P.POOL_N, vectors: true });
+      return J({ ok: true, n: P.N, rn: P.POOL_N, legalN: P.LEGAL_N, vectors: true });
     }
 
     if (kind === "guess") {
@@ -324,15 +348,16 @@ export async function handle(context, kind) {
       if (!words.length) return J({ err: "no words" }, 400);
       const P = await eng.loadLang(p.l);
       const si = P.IDX.get(p.s);
-      if (si === undefined) return J({ err: "secret gone" }, 500);
+      if (si === undefined || !P.LEGAL_MASK[si]) return J({ err: "secret gone" }, 500);
       const scores = eng.scorePass(P, si, p.s);
       const items = words.map((w) => {
         const wi = P.IDX.get(w);
-        if (wi === undefined) return null;
+        if (wi === undefined || !P.LEGAL_MASK[wi]) return null;
         const r = wi === si ? 1 : eng.rankAt(P, scores, wi);
-        return { r, d: r };
+        const pr = eng.poolRankAt(P, scores, wi);
+        return { r, d: r, pr };
       });
-      return J({ items, n: P.POOL_N });
+      return J({ items, n: P.LEGAL_N });
     }
 
     if (kind === "hint") {
@@ -342,13 +367,16 @@ export async function handle(context, kind) {
       if (!p) return J({ err: "bad token" }, 400);
       const P = await eng.loadLang(p.l);
       const si = P.IDX.get(p.s);
-      if (si === undefined) return J({ err: "secret gone" }, 500);
-      let r = b.r | 0;
-      if (!(r >= 1 && r <= P.POOL_N)) return J({ err: "bad rank" }, 400);
+      if (si === undefined || !P.LEGAL_MASK[si]) return J({ err: "secret gone" }, 500);
+      // pr is the pool ordinal requested by the client (old clients sent r,
+      // which used to be the same coordinate; accept both for compatibility)
+      const pr = (b.pr != null ? b.pr : b.r) | 0;
+      if (!(pr >= 1 && pr <= P.POOL_N)) return J({ err: "bad rank" }, 400);
       const scores = eng.scorePass(P, si, p.s);
-      const wi = r === 1 ? si : eng.indexAtRank(P, scores, r);
+      const wi = pr === 1 ? si : eng.indexAtRank(P, scores, pr);
       const rr = wi === si ? 1 : eng.rankAt(P, scores, wi);
-      return J({ word: P.WORDS[wi], r: rr, d: rr, n: P.POOL_N });
+      const prr = wi === si ? 1 : eng.poolRankAt(P, scores, wi);
+      return J({ word: P.WORDS[wi], r: rr, pr: prr, d: rr, n: P.LEGAL_N });
     }
 
     if (kind === "def") {

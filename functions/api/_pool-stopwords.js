@@ -9,8 +9,8 @@
      1. POOL_STOP — closed-class words (articles, pronouns, auxiliaries,
         prepositions, conjunctions, quantifiers, numbers, greetings and
         other function-like tokens). They are excluded from the ranking
-        pool, from hints and from secret selection. They can still be
-        *guessed* offline for ranking, but the UI rejects them up front.
+        pool, from the displayed total order, from hints and from secret
+        selection. The UI rejects them up front.
 
      2. BLOCKED — hard-blocked English stems (never a secret, never a
         suggestion).

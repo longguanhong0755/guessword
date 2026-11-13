@@ -84,21 +84,23 @@ for (const L of LANGS) {
   if (!jNew.t) { fail('/api/new: ' + JSON.stringify(jNew).slice(0, 160)); continue; }
   ok(`/api/new token (pool ${jNew.pool})`);
 
-  const jH1 = await jpost('/api/hint', { t: jNew.t, r: 1 });
-  if (!jH1.word || jH1.d !== 1 || !P.IDX.has(jH1.word)) { fail('/api/hint r=1: ' + JSON.stringify(jH1).slice(0, 160)); continue; }
+  const jH1 = await jpost('/api/hint', { t: jNew.t, pr: 1 });
+  if (!jH1.word || jH1.d !== 1 || jH1.r !== 1 || jH1.pr !== 1 || !P.IDX.has(jH1.word)) {
+    fail('/api/hint pr=1: ' + JSON.stringify(jH1).slice(0, 160)); continue;
+  }
   const secret = jH1.word;
-  ok(`/api/hint r=1 reveals secret "${secret}"`);
+  ok(`/api/hint pr=1 reveals secret "${secret}"`);
 
   const ref = buildRanksRef(P, secret, L);
   if (!ref) { fail(`secret "${secret}" not in deployed word list`); continue; }
-  if (jNew.n !== ref.N) fail(`/api/new n=${jNew.n} vs ref rank pool ${ref.N}`);
-  else ok(`/api/new reports rank-pool size ${jNew.n}`);
+  if (jNew.n !== ref.N) fail(`/api/new n=${jNew.n} vs ref legal total order ${ref.N}`);
+  else ok(`/api/new reports legal total-order size ${jNew.n}`);
 
   // sample: spread + rank-adjacent words (exercises the 1e-6 tie jitter) + bounds + a non-vocab probe
   const sample = [];
-  for (let k = 0; k < 30; k++) sample.push(P.WORDS[Math.floor(k * P.N / 30)]);
+  for (let k = 0; k < 30; k++) sample.push(ref.wordAt[Math.floor(k * ref.N / 30)]);
   for (const k of [1, 2, 3, 10, 100, 1000]) sample.push(ref.wordAt[Math.min(k, ref.N) - 1]);
-  sample.push(P.WORDS[0], P.WORDS[P.N - 1], secret);
+  sample.push(ref.wordAt[0], ref.wordAt[ref.N - 1], secret);
   const words = [...new Set(sample)].slice(0, 45);
   const wordsWithNeg = [...words, 'zzzzqqq'];
   const jGuess = await jpost('/api/guess', { t: jNew.t, words: wordsWithNeg });
@@ -108,23 +110,26 @@ for (const L of LANGS) {
   items.forEach((it, ix) => {
     const w = wordsWithNeg[ix];
     if (w === 'zzzzqqq') { if (it !== null) { bad++; fail(`non-vocab word returned ${JSON.stringify(it)}`); } return; }
-    const cr = ref.rankOf.get(w), cd = ref.distOf[cr - 1];
-    if (!it || it.r !== cr || it.d !== cd) { bad++; if (bad < 4) fail(`guess ${w}: ${JSON.stringify(it)} vs r=${cr} d=${cd}`); }
+    const cr = ref.rankOf.get(w), cd = ref.distOf[cr - 1], cp = ref.poolRankOf.get(w);
+    if (!it || it.r !== cr || it.d !== cd || it.pr !== cp) {
+      bad++; if (bad < 4) fail(`guess ${w}: ${JSON.stringify(it)} vs r=${cr} d=${cd} pr=${cp}`);
+    }
   });
-  if (!bad) ok(`/api/guess ranks+distances identical for ${wordsWithNeg.length} words (incl. non-vocab -> null)`);
+  if (!bad) ok(`/api/guess ranks+prs identical for ${wordsWithNeg.length} words (incl. non-vocab -> null)`);
 
   let hbad = 0;
-  const ks = [1, 2, 3, 4, 7, 15, 42, 100, 333, 1000, 2500, Math.floor(ref.N / 2), ref.N].filter((k) => k <= ref.N);
+  const ks = [1, 2, 3, 4, 7, 15, 42, 100, 333, 1000, 2500, Math.floor(ref.poolN / 2), ref.poolN].filter((k) => k <= ref.poolN);
   for (const k of ks) {
-    const jh = await jpost('/api/hint', { t: jNew.t, r: k });
-    if (jh.word !== ref.wordAt[k - 1] || jh.r !== k || jh.d !== ref.distOf[k - 1]) {
-      hbad++; fail(`hint r=${k}: ${JSON.stringify(jh)} vs word=${ref.wordAt[k - 1]} r=${k} d=${ref.distOf[k - 1]}`);
+    const jh = await jpost('/api/hint', { t: jNew.t, pr: k });
+    const hr = ref.rankOf.get(jh.word);
+    if (jh.word !== ref.poolWordAt[k - 1] || jh.pr !== k || jh.r !== hr || jh.d !== hr) {
+      hbad++; fail(`hint pr=${k}: ${JSON.stringify(jh)} vs word=${ref.poolWordAt[k - 1]} r=${hr} pr=${k}`);
     }
   }
-  if (!hbad) ok(`/api/hint word+rank+dist identical (${ks.length} ranks)`);
+  if (!hbad) ok(`/api/hint pool ordinal -> word+legal rank identical (${ks.length} ranks)`);
 
-  const jhFirst = await jpost('/api/hint', { t: jNew.t, r: 1 });
-  if (!poolOkRef(L, jhFirst.word)) fail(`/api/hint r=1 returned function/blocked word "${jhFirst.word}"`);
+  const jhFirst = await jpost('/api/hint', { t: jNew.t, pr: 1 });
+  if (!poolOkRef(L, jhFirst.word)) fail(`/api/hint pr=1 returned function/blocked word "${jhFirst.word}"`);
   else {
     const wi = P.IDX.get(jhFirst.word);
     if (wi === undefined || !(P.LVIDX[wi] >= 0 && P.LVIDX[wi] < LV_COUNTS[L])) fail(`/api/hint r=1 returned ungraded word "${jhFirst.word}"`);
