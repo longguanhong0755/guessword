@@ -43,9 +43,15 @@ export function decodePack(meta, vecBytes) {
   return { D: D2, N: N2, WORDS: words, LVIDX: lv, UNIT: unit, IDX: new Map(words.map((w, i) => [w, i])) };
 }
 
-// verbatim buildRanks(): scores = cos + rng(lang|secret|word) * 1e-6, then
-// rank within the graded, non-function-word pool (score desc, word asc).
-// Non-pool words are ranked by insertion into that order.
+// verbatim buildRanks(): scores = cos + rng(lang|secret|word) * 1e-6, then a
+// single total order over every legal guess (LEGAL: non-function, non-blocked,
+// level 9 included). The secret is rank 1 (its score is pinned to 2.0).
+//
+// POOL (graded + legal) is still the only source of secrets and hints. Its
+// ordinal/bucket rank is kept separately as poolRankOf/poolWordAt so hint
+// targeting can stay on the graded vocabulary while the UI displays the legal
+// rank. For a pool word pr is its pool position; for a non-pool word pr is
+// the bucket number (1 + #pool words above), which is only used internally.
 export function buildRanksRef(P, secretWord, lang) {
   const P_D = P.D, P_N = P.N, P_W = P.WORDS, P_U = P.UNIT;
   const si = P.IDX.get(secretWord);
@@ -58,35 +64,35 @@ export function buildRanksRef(P, secretWord, lang) {
     scores[i] = dot + rngRef(lang + "|" + secretWord + "|" + P_W[i])() * 1e-6;
   }
   const nLv = LV_COUNTS[lang] || 6;
-  const mask = new Uint8Array(P_N), pool = [];
+  const poolMask = new Uint8Array(P_N), pool = [];
+  const legalMask = new Uint8Array(P_N), legal = [];
   for (let i = 0; i < P_N; i++) {
+    const w = P_W[i];
+    if (!poolOkRef(lang, w)) continue;
+    legalMask[i] = 1; legal.push(i);
     const l = P.LVIDX[i];
-    if (l >= 0 && l < nLv && poolOkRef(lang, P_W[i])) { mask[i] = 1; pool.push(i); }
+    if (l >= 0 && l < nLv) { poolMask[i] = 1; pool.push(i); }
   }
-  const poolN = pool.length;
-  const order = new Array(poolN);
-  for (let k = 0; k < poolN; k++) order[k] = pool[k];
+  const poolN = pool.length, legalN = legal.length;
+  // a secret outside LEGAL (legacy save: a function word / removed entry) has
+  // no rank in the new scale; callers restart instead of mixing scales.
+  if (!legalMask[si]) return null;
+
+  const order = new Array(legalN);
+  for (let k = 0; k < legalN; k++) order[k] = legal[k];
   order.sort((a, b) => scores[b] - scores[a] || (P_W[a] < P_W[b] ? -1 : (P_W[a] > P_W[b] ? 1 : 0)));
-  const rankOf = new Map(), wordAt = new Array(poolN);
-  for (let k = 0; k < poolN; k++) {
-    const i = order[k];
-    rankOf.set(P_W[i], k + 1);
-    wordAt[k] = P_W[i];
+
+  const rankOf = new Map(), wordAt = new Array(legalN);
+  const poolRankOf = new Map(), poolWordAt = new Array(poolN);
+  let poolSeen = 0;
+  for (let k = 0; k < legalN; k++) {
+    const i = order[k], w = P_W[i];
+    rankOf.set(w, k + 1);
+    wordAt[k] = w;
+    poolRankOf.set(w, poolSeen + 1);
+    if (poolMask[i]) poolWordAt[poolSeen++] = w;
   }
-  for (let i = 0; i < P_N; i++) {
-    if (mask[i]) continue;
-    const s = scores[i], w = P_W[i];
-    let lo = 0, hi = poolN;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1, j = order[mid];
-      if (scores[j] > s || (scores[j] === s && P_W[j] < w)) lo = mid + 1; else hi = mid;
-    }
-    // rank 1 is reserved for the secret (see js/app.js / _engine.js)
-    rankOf.set(w, w === secretWord ? 1 : Math.max(2, lo + 1));
-  }
-  // a legacy save may carry a secret outside the pool: rank 1 stays unique
-  if (poolN && !mask[si]) { rankOf.set(P_W[order[0]], 2); wordAt[0] = secretWord; }
-  const distOf = new Array(poolN + 1);
-  for (let r = 0; r <= poolN; r++) distOf[r] = r + 1;
-  return { rankOf, wordAt, distOf, N: poolN, poolN, lang, pool, mask };
+  const distOf = new Array(legalN);
+  for (let r = 0; r < legalN; r++) distOf[r] = r + 1;
+  return { rankOf, wordAt, distOf, N: legalN, poolN, lang, pool, mask: poolMask, legal, legalMask, poolRankOf, poolWordAt };
 }

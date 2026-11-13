@@ -75,50 +75,67 @@ for (const L of LANGS) {
   if (same) for (let i = 0; i < S.UNIT.length; i++) if (S.UNIT[i] !== P.UNIT[i]) { same = false; console.log('   first diff at', i, S.UNIT[i], P.UNIT[i]); break; }
   same ? ok('unit matrix bit-identical') : fail('unit matrix differs');
 
-  // rank pool: server and client must select the same graded, non-function words
-  const ref0 = buildRanksRef(P, P.WORDS[0], L);
-  if (S.POOL_N !== ref0.N) fail(`pool size ${S.POOL_N} vs ref ${ref0.N}`);
-  else ok(`rank pool size identical (${S.POOL_N} words)`);
+  // POOL: server and client must select the same graded, non-function words.
+  // LEGAL: the same non-function word set (level 9 included) in the same order.
+  const ref0Secret = P.WORDS.find((w, i) => P.LVIDX[i] >= 0 && P.LVIDX[i] < LV_COUNTS[L] && poolOkRef(L, w));
+  const ref0 = buildRanksRef(P, ref0Secret, L);
+  if (!ref0) { fail('reference build failed'); continue; }
+  if (S.POOL_N !== ref0.poolN) fail(`pool size ${S.POOL_N} vs ref ${ref0.poolN}`);
+  else ok(`pool size identical (${S.POOL_N} words)`);
   let poolSame = S.POOL.length === ref0.pool.length;
   if (poolSame) for (let k = 0; k < S.POOL.length; k++) if (S.POOL[k] !== ref0.pool[k]) { poolSame = false; console.log('   first diff at', k, S.POOL[k], ref0.pool[k]); break; }
-  poolSame ? ok('rank pool index list identical') : fail('rank pool differs');
+  poolSame ? ok('pool index list identical') : fail('pool differs');
+  if (S.LEGAL_N !== ref0.N) fail(`legal size ${S.LEGAL_N} vs ref ${ref0.N}`);
+  else ok(`legal total-order size identical (${S.LEGAL_N} words)`);
+  let legalSame = S.LEGAL.length === ref0.legal.length;
+  if (legalSame) for (let k = 0; k < S.LEGAL.length; k++) if (S.LEGAL[k] !== ref0.legal[k]) { legalSame = false; console.log('   first legal diff at', k, S.LEGAL[k], ref0.legal[k]); break; }
+  legalSame ? ok('legal index list identical') : fail('legal index list differs');
 
-  // regression: a non-pool word that outscores every pool word (typically an
-  // ungraded inflected form) must rank 2+, never 1 — rank 1 means "the secret"
+  // LEGAL is exactly the non-function, non-blocked set; its ranks are a bijection
+  let stopN = 0;
+  for (let i = 0; i < P.N; i++) if (!poolOkRef(L, P.WORDS[i])) stopN++;
+  if (ref0.N !== P.N - stopN) fail(`legal size ${ref0.N} vs N-stopwords ${P.N - stopN}`);
+  else ok(`legal size = N - function/blocked words (${P.N} - ${stopN})`);
   {
-    const step = Math.max(1, Math.floor(ref0.pool.length / 12));
-    let found = null;
-    for (let k = 0; k < ref0.pool.length && !found; k += step) {
-      const si = ref0.pool[k], soff = si * P.D;
-      let bestAll = -Infinity, biAll = -1, bestPool = -Infinity;
-      for (let i = 0; i < P.N; i++) {
-        if (i === si) continue;
-        let dot = 0, off = i * P.D;
-        for (let d = 0; d < P.D; d++) dot += P.UNIT[off + d] * P.UNIT[soff + d];
-        if (dot > bestAll) { bestAll = dot; biAll = i; }
-        if (ref0.mask[i] && dot > bestPool) bestPool = dot;
-      }
-      if (biAll >= 0 && !ref0.mask[biAll] && bestAll > bestPool) found = { si, biAll, secret: P.WORDS[si], variant: P.WORDS[biAll] };
+    let setOk = true, lv9Ok = true;
+    for (let i = 0; i < P.N; i++) {
+      const legal = !!ref0.legalMask[i];
+      if (legal !== poolOkRef(L, P.WORDS[i])) { setOk = false; break; }
+      if (P.LVIDX[i] === 9 && legal && !ref0.rankOf.has(P.WORDS[i])) { lv9Ok = false; break; }
     }
-    if (!found) ok('no non-pool global argmax in the sampled secrets');
-    else {
-      const refS = buildRanksRef(P, found.secret, L);
-      const sc = eng.scorePass(S, found.si, found.secret);
-      const rRef = refS.rankOf.get(found.variant), rSrv = eng.rankAt(S, sc, P.IDX.get(found.variant));
-      if (rRef < 2 || rSrv < 2) fail(`non-pool top word "${found.variant}" (for "${found.secret}") ranks ref=${rRef} srv=${rSrv}; rank 1 would fake a win`);
-      else ok(`non-pool top word "${found.variant}" capped at rank ${rSrv} (secret "${found.secret}")`);
-      if (refS.rankOf.get(found.secret) !== 1) fail(`secret "${found.secret}" does not own rank 1 in ref`);
-    }
+    setOk ? ok('LEGAL membership matches the shared predicate') : fail('LEGAL membership differs');
+    lv9Ok ? ok('level-9 words are ranked in LEGAL') : fail('level-9 word missing from LEGAL ranks');
+    const seen = new Set(ref0.wordAt);
+    let bij = ref0.wordAt.length === ref0.N && seen.size === ref0.N && ref0.rankOf.size === ref0.N;
+    for (let k = 0; k < ref0.N && bij; k++) if (ref0.rankOf.get(ref0.wordAt[k]) !== k + 1) bij = false;
+    bij ? ok(`ranks are a bijection 1..${ref0.N}`) : fail('ranks are not a bijection');
   }
 
-  // ranks: sample secrets x sample words through the real handlers
-  const secrets = [P.WORDS[3], P.WORDS[Math.floor(P.N / 2)], P.WORDS[P.N - 5]];
+  // fixed regression from the external report: the level-9 synonym chain must
+  // be strictly ordered instead of all sharing rank 2
+  if (L === 'en') {
+    const ri = buildRanksRef(P, 'ingrate', L);
+    const want = [['ingrate', 1], ['ungrateful', 2], ['wretch', 3], ['bastard', 4], ['obnoxious', 5], ['arrogant', 6]];
+    let bad = 0;
+    if (!ri) { bad++; fail('ingrate reference missing'); }
+    else for (const [w, r] of want) {
+      const got = ri.rankOf.get(w);
+      if (got !== r) { bad++; fail(`ingrate/${w}: rank ${got} vs ${r}`); }
+    }
+    if (!bad) ok('ingrate chain is 1..6 (ungrateful, wretch, bastard, obnoxious, arrogant)');
+  }
+
+  // ranks: sample pool secrets x legal words through the engine functions
+  // (real secrets always come from POOL; a level-9 secret would not have a
+  // poolWordAt[0] entry and cannot exercise hint targeting)
+  const secrets = [0, Math.floor(ref0.poolN / 2), ref0.poolN - 1].map((k) => P.WORDS[ref0.pool[k]]);
   for (const secret of secrets) {
     const r2 = buildRanksRef(P, secret, L);
-    const pool = Array.from({ length: 300 }, (_, k) => P.WORDS[Math.floor(k * P.N / 300)]);
-    pool.push(secret, P.WORDS[0], P.WORDS[P.N - 1]);
+    if (!r2) { fail(`reference build failed for secret "${secret}"`); continue; }
+    const pool = Array.from({ length: 300 }, (_, k) => r2.wordAt[Math.floor(k * r2.N / 300)]);
+    pool.push(secret, r2.wordAt[0], r2.wordAt[r2.N - 1]);
 
-    // drive the actual /api/guess handler via a forged token-free path: use engine directly
+    // drive the actual engine functions directly
     const si = P.IDX.get(secret);
     const scores = eng.scorePass(S, si, secret);
     let bad = 0;
@@ -126,14 +143,18 @@ for (const L of LANGS) {
       const wi = P.IDX.get(w);
       const rServer = w === secret ? 1 : eng.rankAt(S, scores, wi);
       const rClient = r2.rankOf.get(w);
-      const dServer = rServer, dClient = rClient;
-      if (rServer !== rClient || dServer !== dClient) { bad++; if (bad < 4) fail(`${w}: server r=${rServer} d=${dServer} vs client r=${rClient} d=${dClient}`); }
+      const prServer = eng.poolRankAt(S, scores, wi);
+      const prClient = r2.poolRankOf.get(w);
+      if (rServer !== rClient || prServer !== prClient) {
+        bad++;
+        if (bad < 4) fail(`${w}: server r=${rServer} pr=${prServer} vs client r=${rClient} pr=${prClient}`);
+      }
     }
-    if (!bad) ok(`ranks identical for ${pool.length} words (secret "${secret}")`);
+    if (!bad) ok(`ranks+pr identical for ${pool.length} words (secret "${secret}")`);
 
-    // hint selection: word at rank k must match client wordAt[k-1]
+    // hint selection: pool ordinal k must match client poolWordAt[k-1]
     let hbad = 0;
-    const nPool = r2.N;
+    const nPool = r2.poolN;
     const ks = [1, 2, 3, 4, 7, 15, 42, 100, 333, 1000, 2500, Math.floor(nPool / 2), nPool];
     let hchecked = 0;
     for (const k of ks) {
@@ -141,9 +162,11 @@ for (const L of LANGS) {
       hchecked++;
       const wi = k === 1 ? si : eng.indexAtRank(S, scores, k);
       const w = P.WORDS[wi];
-      if (w !== r2.wordAt[k - 1]) { hbad++; fail(`hint rank ${k}: ${w} vs ${r2.wordAt[k - 1]}`); }
+      if (w !== r2.poolWordAt[k - 1]) { hbad++; fail(`hint pool rank ${k}: ${w} vs ${r2.poolWordAt[k - 1]}`); }
+      if (eng.poolRankAt(S, scores, wi) !== k) { hbad++; fail(`hint pool rank ${k}: server pr=${eng.poolRankAt(S, scores, wi)}`); }
+      if (eng.rankAt(S, scores, wi) !== r2.rankOf.get(w)) { hbad++; fail(`hint pool rank ${k}: legal r mismatch`); }
     }
-    if (!hbad) ok(`hint rank -> word identical (${hchecked} ranks)`);
+    if (!hbad) ok(`hint pool ordinal -> word/legal rank identical (${hchecked} ranks)`);
   }
 
   // full HTTP layer: /api/new -> /api/guess -> /api/hint -> /api/def
@@ -153,34 +176,37 @@ for (const L of LANGS) {
   if (!jNew.t) fail('api/new failed: ' + JSON.stringify(jNew));
   else {
     ok('api/new token ok (pool ' + jNew.pool + ')');
-    if (jNew.n !== ref0.N) fail(`api/new n=${jNew.n} vs ref pool ${ref0.N}`);
-    else ok('api/new reports rank-pool size ' + jNew.n);
+    if (jNew.n !== ref0.N) fail(`api/new n=${jNew.n} vs ref legal ${ref0.N}`);
+    else ok('api/new reports legal total-order size ' + jNew.n);
   }
 
-  // decode the token by exercising /api/hint r=1 (the server reveals the secret there)
-  const rHint1 = await handle(ctx(base + '/api/hint', { t: jNew.t, r: 1 }), 'hint');
+  // decode the token by exercising /api/hint pr=1 (the server reveals the secret there)
+  const rHint1 = await handle(ctx(base + '/api/hint', { t: jNew.t, pr: 1 }), 'hint');
   const jHint1 = await rHint1.json();
-  if (!jHint1.word || jHint1.d !== 1) fail('api/hint r=1: ' + JSON.stringify(jHint1)); else ok('api/hint r=1 reveals secret "' + jHint1.word + '"');
+  if (!jHint1.word || jHint1.d !== 1 || jHint1.r !== 1 || jHint1.pr !== 1) fail('api/hint pr=1: ' + JSON.stringify(jHint1));
+  else ok('api/hint pr=1 reveals secret "' + jHint1.word + '" with r=1');
 
   const secret2 = jHint1.word;
   const r2b = buildRanksRef(P, secret2, L);
-  const sample = [P.WORDS[10], P.WORDS[1000], secret2];
+  const sample = [r2b.wordAt[10], r2b.wordAt[1000], secret2];
   const rGuess = await handle(ctx(base + '/api/guess', { t: jNew.t, words: sample }), 'guess');
   const jGuess = await rGuess.json();
   let gbad = 0;
   (jGuess.items || []).forEach((it, ix) => {
     const w = sample[ix];
-    const cr = r2b.rankOf.get(w), cd = r2b.distOf[cr - 1];
-    if (!it || it.r !== cr || it.d !== cd) { gbad++; fail(`api/guess ${w}: ${JSON.stringify(it)} vs r=${cr} d=${cd}`); }
+    const cr = r2b.rankOf.get(w), cd = r2b.distOf[cr - 1], cp = r2b.poolRankOf.get(w);
+    if (!it || it.r !== cr || it.d !== cd || it.pr !== cp) { gbad++; fail(`api/guess ${w}: ${JSON.stringify(it)} vs r=${cr} d=${cd} pr=${cp}`); }
   });
-  if (!gbad) ok('api/guess via HTTP matches client ranks');
+  if (!gbad) ok('api/guess via HTTP matches client legal ranks and pr');
 
-  const rHint = await handle(ctx(base + '/api/hint', { t: jNew.t, r: 7 }), 'hint');
+  const rHint = await handle(ctx(base + '/api/hint', { t: jNew.t, pr: 7 }), 'hint');
   const jHint = await rHint.json();
-  if (jHint.word !== r2b.wordAt[6] || jHint.d !== r2b.distOf[6]) fail(`api/hint r=7: ${JSON.stringify(jHint)} vs ${r2b.wordAt[6]} d=${r2b.distOf[6]}`);
-  else ok('api/hint r=7 matches client');
+  const hw = jHint.word, hr = r2b.rankOf.get(hw), hp = 7;
+  if (hw !== r2b.poolWordAt[6] || jHint.r !== hr || jHint.d !== hr || jHint.pr !== hp) {
+    fail(`api/hint pr=7: ${JSON.stringify(jHint)} vs ${r2b.poolWordAt[6]} r=${hr} pr=${hp}`);
+  } else ok('api/hint pr=7 matches client (displayed legal rank ' + hr + ')');
   if (jHint.n !== r2b.N) fail(`api/hint n=${jHint.n} vs ref ${r2b.N}`);
-  else ok('api/hint reports rank-pool size ' + jHint.n);
+  else ok('api/hint reports legal total-order size ' + jHint.n);
   if (!poolOkRef(L, jHint.word)) fail(`api/hint returned function/blocked word "${jHint.word}"`);
   else ok('api/hint word is an eligible pool word');
   const wiHint = P.IDX.get(jHint.word);
